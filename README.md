@@ -1,6 +1,6 @@
-# Quantum-Resistant Bitcoin
+# Postera
 
-A proof-of-concept cryptocurrency using post-quantum cryptography (CRYSTALS-Dilithium signatures) to provide resistance against quantum computer attacks.
+A cryptocurrency using post-quantum cryptography (CRYSTALS-Dilithium signatures) to provide resistance against quantum computer attacks.
 
 ## Features
 
@@ -21,20 +21,20 @@ cargo build --release
 ### Generate a Wallet
 
 ```bash
-./target/release/quantum-resistant-btc new-wallet -o my-wallet.json
+./target/release/postera new-wallet -o my-wallet.json
 ```
 
 ### Run a Node
 
 ```bash
 # Start a node on default port 8333
-./target/release/quantum-resistant-btc node
+./target/release/postera node
 
 # Start with mining enabled
-./target/release/quantum-resistant-btc node --mine <your-address>
+./target/release/postera node --mine <your-address>
 
 # Connect to peers
-./target/release/quantum-resistant-btc node --peer http://peer1:8333 --peer http://peer2:8333
+./target/release/postera node --peer http://peer1:8333 --peer http://peer2:8333
 ```
 
 The node exposes:
@@ -44,19 +44,19 @@ The node exposes:
 ### Check Balance
 
 ```bash
-./target/release/quantum-resistant-btc balance <address>
+./target/release/postera balance <address>
 ```
 
 ### Send Transaction
 
 ```bash
-./target/release/quantum-resistant-btc send <recipient-address> <amount> -w my-wallet.json
+./target/release/postera send <recipient-address> <amount> -w my-wallet.json
 ```
 
 ### Standalone Mining
 
 ```bash
-./target/release/quantum-resistant-btc mine -a <your-address> -d 16
+./target/release/postera mine -a <your-address> -d 16
 ```
 
 ## Architecture

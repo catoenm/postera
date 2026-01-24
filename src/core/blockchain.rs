@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::crypto::Address;
+use crate::storage::Database;
 
 use super::{Block, BlockError, State, Transaction};
 
@@ -17,10 +20,12 @@ pub struct Blockchain {
     state: State,
     /// Current mining difficulty
     difficulty: u64,
+    /// Optional persistent storage
+    db: Option<Arc<Database>>,
 }
 
 impl Blockchain {
-    /// Create a new blockchain with a genesis block.
+    /// Create a new blockchain with a genesis block (in-memory only).
     pub fn new(difficulty: u64) -> Self {
         let genesis = Block::genesis(difficulty);
         let genesis_hash = genesis.hash();
@@ -33,6 +38,88 @@ impl Blockchain {
             height_index: vec![genesis_hash],
             state: State::new(),
             difficulty,
+            db: None,
+        }
+    }
+
+    /// Open a blockchain from persistent storage, or create a new one.
+    pub fn open<P: AsRef<Path>>(path: P, difficulty: u64) -> Result<Self, BlockchainError> {
+        let db = Database::open(path).map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+        let db = Arc::new(db);
+
+        // Check if we have an existing chain
+        let stored_height = db
+            .get_height()
+            .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+
+        if let Some(height) = stored_height {
+            // Load existing chain
+            println!("Loading blockchain from disk (height: {})...", height);
+
+            let mut blocks = HashMap::new();
+            let mut height_index = Vec::new();
+            let mut state = State::new();
+
+            // Load all blocks and rebuild state
+            for h in 0..=height {
+                let block = db
+                    .load_block_by_height(h)
+                    .map_err(|e| BlockchainError::StorageError(e.to_string()))?
+                    .ok_or_else(|| {
+                        BlockchainError::StorageError(format!("Missing block at height {}", h))
+                    })?;
+
+                // Apply transactions to state
+                for tx in &block.transactions {
+                    state
+                        .apply_transaction(tx)
+                        .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
+                }
+
+                let hash = block.hash();
+                blocks.insert(hash, block);
+                height_index.push(hash);
+            }
+
+            // Load difficulty from metadata or use provided
+            let stored_difficulty = db
+                .get_metadata("difficulty")
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(difficulty);
+
+            println!("Loaded {} blocks from disk", height + 1);
+
+            Ok(Self {
+                blocks,
+                height_index,
+                state,
+                difficulty: stored_difficulty,
+                db: Some(db),
+            })
+        } else {
+            // Create new chain with genesis block
+            println!("Creating new blockchain...");
+
+            let genesis = Block::genesis(difficulty);
+            let genesis_hash = genesis.hash();
+
+            // Save genesis block
+            db.save_block(&genesis, 0)
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+            db.set_metadata("difficulty", &difficulty.to_string())
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+
+            let mut blocks = HashMap::new();
+            blocks.insert(genesis_hash, genesis);
+
+            Ok(Self {
+                blocks,
+                height_index: vec![genesis_hash],
+                state: State::new(),
+                difficulty,
+                db: Some(db),
+            })
         }
     }
 
@@ -152,6 +239,14 @@ impl Blockchain {
 
         // Add to chain
         let hash = block.hash();
+        let new_height = self.height_index.len() as u64;
+
+        // Persist to disk if we have a database
+        if let Some(ref db) = self.db {
+            db.save_block(&block, new_height)
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+        }
+
         self.blocks.insert(hash, block);
         self.height_index.push(hash);
 
@@ -215,6 +310,8 @@ pub enum BlockchainError {
     InvalidCoinbaseAmount,
     #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),
+    #[error("Storage error: {0}")]
+    StorageError(String),
 }
 
 #[cfg(test)]

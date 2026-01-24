@@ -2,15 +2,15 @@ use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use quantum_resistant_btc::consensus::mine_block;
-use quantum_resistant_btc::core::Blockchain;
-use quantum_resistant_btc::crypto::Address;
-use quantum_resistant_btc::network::{create_router, Mempool};
-use quantum_resistant_btc::wallet::Wallet;
+use postera::consensus::mine_block;
+use postera::core::Blockchain;
+use postera::crypto::Address;
+use postera::network::{create_router, Mempool};
+use postera::wallet::Wallet;
 
 #[derive(Parser)]
-#[command(name = "qrbtc")]
-#[command(about = "Quantum-Resistant Bitcoin - A post-quantum cryptocurrency", long_about = None)]
+#[command(name = "postera")]
+#[command(about = "Postera - A post-quantum cryptocurrency", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -268,15 +268,15 @@ fn cmd_mine(address: &str, blocks: u64, difficulty: u64) -> anyhow::Result<()> {
 }
 
 async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64, mine: Option<String>) -> anyhow::Result<()> {
-    use quantum_resistant_btc::network::{AppState, sync_from_peer, sync_loop, broadcast_block};
-    use quantum_resistant_btc::consensus::mine_block;
+    use postera::network::{AppState, sync_from_peer, sync_loop, broadcast_block};
+    use postera::consensus::mine_block;
     use std::sync::RwLock;
 
     // Create data directory if needed
     std::fs::create_dir_all(data_dir)?;
 
     println!("===========================================");
-    println!("  Quantum-Resistant Bitcoin Node v0.1.0");
+    println!("         Postera Node v0.1.0");
     println!("===========================================");
     println!();
     println!("Difficulty:     {} leading zero bits", difficulty);
@@ -288,8 +288,9 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64
     }
     println!();
 
-    // Initialize blockchain
-    let blockchain = Blockchain::new(difficulty);
+    // Initialize blockchain with persistence
+    let db_path = format!("{}/blockchain", data_dir);
+    let blockchain = Blockchain::open(&db_path, difficulty)?;
     let mempool = Mempool::new();
 
     let state = Arc::new(AppState {
@@ -299,7 +300,7 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64
 
     // Create router with API and explorer
     let app = create_router(state.clone())
-        .nest("/explorer", quantum_resistant_btc::explorer::create_explorer_router());
+        .nest("/explorer", postera::explorer::create_explorer_router());
 
     // Sync from peers on startup
     if !peers.is_empty() {

@@ -1,8 +1,8 @@
 [package]
-name = "quantum-resistant-btc"
+name = "postera"
 version = "0.1.0"
 edition = "2021"
-description = "A quantum-resistant cryptocurrency using post-quantum signatures"
+description = "A cryptocurrency using post-quantum cryptography"
 license = "MIT"
 
 [dependencies]
