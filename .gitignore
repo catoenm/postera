@@ -1,0 +1,16 @@
+# Wallets
+wallet.json
+*.wallet
+wallets/
+
+# Build artifacts
+target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
