@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::core::{Block, Blockchain, ChainInfo, Transaction};
 use crate::crypto::Address;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::Mempool;
 
@@ -17,6 +17,8 @@ use super::Mempool;
 pub struct AppState {
     pub blockchain: RwLock<Blockchain>,
     pub mempool: RwLock<Mempool>,
+    /// List of known peer URLs for gossip
+    pub peers: RwLock<Vec<String>>,
 }
 
 /// Create the API router.
@@ -28,15 +30,22 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/block/height/:height", get(get_block_by_height))
         .route("/account/:address", get(get_account))
         .route("/tx", post(submit_transaction))
+        .route("/tx/:hash", get(get_transaction))
+        .route("/transactions/recent", get(get_recent_transactions))
         .route("/mempool", get(get_mempool))
         // Peer sync endpoints
         .route("/blocks", post(receive_block))
         .route("/blocks/since/:height", get(get_blocks_since))
+        // Peer management
+        .route("/peers", get(get_peers))
+        .route("/peers", post(add_peer))
+        // Transaction relay endpoint (for peer-to-peer relay)
+        .route("/tx/relay", post(receive_transaction))
         .with_state(state)
 }
 
 async fn index() -> &'static str {
-    "Quantum-Resistant Bitcoin Node API v0.1.0"
+    "Postera Node API v0.1.0"
 }
 
 async fn chain_info(State(state): State<Arc<AppState>>) -> Json<ChainInfo> {
@@ -129,6 +138,123 @@ async fn get_account(
     }))
 }
 
+#[derive(Serialize)]
+struct TransactionResponse {
+    hash: String,
+    from: String,
+    to: String,
+    amount: u64,
+    fee: u64,
+    nonce: u64,
+    is_coinbase: bool,
+    status: String,
+    block_height: Option<u64>,
+}
+
+async fn get_transaction(
+    State(state): State<Arc<AppState>>,
+    Path(hash): Path<String>,
+) -> Result<Json<TransactionResponse>, StatusCode> {
+    let hash_bytes: [u8; 32] = hex::decode(&hash)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // Check mempool first
+    {
+        let mempool = state.mempool.read().unwrap();
+        if let Some(tx) = mempool.get(&hash_bytes) {
+            return Ok(Json(TransactionResponse {
+                hash: tx.hash_hex(),
+                from: tx.from.to_hex(),
+                to: tx.to.to_hex(),
+                amount: tx.amount,
+                fee: tx.fee,
+                nonce: tx.nonce,
+                is_coinbase: tx.is_coinbase(),
+                status: "pending".to_string(),
+                block_height: None,
+            }));
+        }
+    }
+
+    // Search in blockchain
+    let chain = state.blockchain.read().unwrap();
+    for h in (0..=chain.height()).rev() {
+        if let Some(block) = chain.get_block_by_height(h) {
+            for tx in &block.transactions {
+                if tx.hash() == hash_bytes {
+                    return Ok(Json(TransactionResponse {
+                        hash: tx.hash_hex(),
+                        from: tx.from.to_hex(),
+                        to: tx.to.to_hex(),
+                        amount: tx.amount,
+                        fee: tx.fee,
+                        nonce: tx.nonce,
+                        is_coinbase: tx.is_coinbase(),
+                        status: "confirmed".to_string(),
+                        block_height: Some(h),
+                    }));
+                }
+            }
+        }
+    }
+
+    Err(StatusCode::NOT_FOUND)
+}
+
+async fn get_recent_transactions(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<TransactionResponse>> {
+    let mut transactions = Vec::new();
+
+    // Get pending transactions from mempool
+    {
+        let mempool = state.mempool.read().unwrap();
+        for tx in mempool.get_transactions(10) {
+            transactions.push(TransactionResponse {
+                hash: tx.hash_hex(),
+                from: tx.from.to_hex(),
+                to: tx.to.to_hex(),
+                amount: tx.amount,
+                fee: tx.fee,
+                nonce: tx.nonce,
+                is_coinbase: tx.is_coinbase(),
+                status: "pending".to_string(),
+                block_height: None,
+            });
+        }
+    }
+
+    // Get recent confirmed transactions from last few blocks
+    let chain = state.blockchain.read().unwrap();
+    let start_height = chain.height().saturating_sub(5);
+
+    for h in (start_height..=chain.height()).rev() {
+        if let Some(block) = chain.get_block_by_height(h) {
+            for tx in &block.transactions {
+                transactions.push(TransactionResponse {
+                    hash: tx.hash_hex(),
+                    from: tx.from.to_hex(),
+                    to: tx.to.to_hex(),
+                    amount: tx.amount,
+                    fee: tx.fee,
+                    nonce: tx.nonce,
+                    is_coinbase: tx.is_coinbase(),
+                    status: "confirmed".to_string(),
+                    block_height: Some(h),
+                });
+            }
+        }
+
+        if transactions.len() >= 20 {
+            break;
+        }
+    }
+
+    Json(transactions)
+}
+
 #[derive(Deserialize)]
 struct SubmitTxRequest {
     transaction: Transaction,
@@ -157,14 +283,25 @@ async fn submit_transaction(
     }
 
     // Add to mempool
-    {
+    let added = {
         let mut mempool = state.mempool.write().unwrap();
-        if !mempool.add(tx) {
-            return Err((
-                StatusCode::CONFLICT,
-                "Transaction already in mempool".to_string(),
-            ));
-        }
+        mempool.add(tx.clone())
+    };
+
+    if !added {
+        return Err((
+            StatusCode::CONFLICT,
+            "Transaction already in mempool".to_string(),
+        ));
+    }
+
+    // Relay to peers (fire and forget)
+    let peers = state.peers.read().unwrap().clone();
+    if !peers.is_empty() {
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            relay_transaction(&tx_clone, &peers).await;
+        });
     }
 
     Ok(Json(SubmitTxResponse {
@@ -200,30 +337,64 @@ async fn receive_block(
 
     info!("Received block {} from peer", &block_hash[..16]);
 
-    // Add to blockchain
-    let mut chain = state.blockchain.write().unwrap();
+    // Try to add the block (handles orphans and forks)
+    let (accepted, status) = {
+        let mut chain = state.blockchain.write().unwrap();
+        match chain.try_add_block(block.clone()) {
+            Ok(true) => {
+                info!("Added block {} to chain (height: {})", &block_hash[..16], chain.height());
 
-    // Check if we already have this block
-    if chain.get_block(&block.hash()).is_some() {
-        return Ok(Json(ReceiveBlockResponse {
-            status: "duplicate".to_string(),
-            hash: block_hash,
-        }));
+                // Remove confirmed transactions from mempool
+                let tx_hashes: Vec<[u8; 32]> = block
+                    .transactions
+                    .iter()
+                    .skip(1) // Skip coinbase
+                    .map(|tx| tx.hash())
+                    .collect();
+
+                let mut mempool = state.mempool.write().unwrap();
+                mempool.remove_confirmed(&tx_hashes);
+
+                // Re-validate remaining mempool transactions
+                let removed = mempool.revalidate(chain.state());
+                if removed > 0 {
+                    info!("Removed {} invalid transactions from mempool after block", removed);
+                }
+
+                (true, "accepted")
+            }
+            Ok(false) => {
+                // Block stored as orphan or already known
+                let orphans = chain.orphan_count();
+                if orphans > 0 {
+                    info!("Block {} stored as orphan (total orphans: {})", &block_hash[..16], orphans);
+                    (false, "orphan")
+                } else {
+                    (false, "duplicate")
+                }
+            }
+            Err(e) => {
+                warn!("Block {} rejected: {}", &block_hash[..16], e);
+                return Err((StatusCode::BAD_REQUEST, format!("Block rejected: {}", e)));
+            }
+        }
+    };
+
+    // Relay to other peers (gossip protocol) if accepted to main chain
+    if accepted {
+        let peers = state.peers.read().unwrap().clone();
+        if !peers.is_empty() {
+            let block_clone = block.clone();
+            tokio::spawn(async move {
+                relay_block(&block_clone, &peers).await;
+            });
+        }
     }
 
-    // Validate and add the block
-    match chain.add_block(block) {
-        Ok(()) => {
-            info!("Added block {} to chain (height: {})", &block_hash[..16], chain.height());
-            Ok(Json(ReceiveBlockResponse {
-                status: "accepted".to_string(),
-                hash: block_hash,
-            }))
-        }
-        Err(e) => {
-            Err((StatusCode::BAD_REQUEST, format!("Block rejected: {}", e)))
-        }
-    }
+    Ok(Json(ReceiveBlockResponse {
+        status: status.to_string(),
+        hash: block_hash,
+    }))
 }
 
 #[derive(Serialize)]
@@ -250,4 +421,153 @@ async fn get_blocks_since(
     }
 
     Json(blocks)
+}
+
+// ============ Peer Management Endpoints ============
+
+#[derive(Serialize)]
+struct PeersResponse {
+    peers: Vec<String>,
+    count: usize,
+}
+
+/// Get the list of known peers.
+async fn get_peers(State(state): State<Arc<AppState>>) -> Json<PeersResponse> {
+    let peers = state.peers.read().unwrap();
+    Json(PeersResponse {
+        count: peers.len(),
+        peers: peers.clone(),
+    })
+}
+
+#[derive(Deserialize)]
+struct AddPeerRequest {
+    url: String,
+}
+
+#[derive(Serialize)]
+struct AddPeerResponse {
+    status: String,
+    peer_count: usize,
+}
+
+/// Add a new peer to the peer list.
+async fn add_peer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddPeerRequest>,
+) -> Json<AddPeerResponse> {
+    let mut peers = state.peers.write().unwrap();
+
+    // Avoid duplicates
+    if !peers.contains(&req.url) {
+        peers.push(req.url.clone());
+        info!("Added peer: {}", req.url);
+    }
+
+    Json(AddPeerResponse {
+        status: "ok".to_string(),
+        peer_count: peers.len(),
+    })
+}
+
+// ============ Transaction Relay ============
+
+/// Receive a transaction from a peer (relay endpoint).
+async fn receive_transaction(
+    State(state): State<Arc<AppState>>,
+    Json(tx): Json<Transaction>,
+) -> Result<Json<SubmitTxResponse>, (StatusCode, String)> {
+    let hash = tx.hash_hex();
+
+    // Check if already in mempool
+    {
+        let mempool = state.mempool.read().unwrap();
+        if mempool.contains(&tx.hash()) {
+            return Ok(Json(SubmitTxResponse {
+                hash,
+                status: "duplicate".to_string(),
+            }));
+        }
+    }
+
+    // Validate transaction
+    {
+        let chain = state.blockchain.read().unwrap();
+        chain
+            .state()
+            .validate_transaction(&tx)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    }
+
+    // Add to mempool
+    let added = {
+        let mut mempool = state.mempool.write().unwrap();
+        mempool.add(tx.clone())
+    };
+
+    if added {
+        info!("Added relayed transaction {} to mempool", &hash[..16]);
+
+        // Continue relaying to other peers
+        let peers = state.peers.read().unwrap().clone();
+        if !peers.is_empty() {
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                relay_transaction(&tx_clone, &peers).await;
+            });
+        }
+    }
+
+    Ok(Json(SubmitTxResponse {
+        hash,
+        status: if added { "accepted".to_string() } else { "duplicate".to_string() },
+    }))
+}
+
+// ============ Relay Helper Functions ============
+
+/// Relay a block to all known peers.
+async fn relay_block(block: &Block, peers: &[String]) {
+    let client = reqwest::Client::new();
+    let block_hash = &block.hash_hex()[..16];
+
+    for peer in peers {
+        let url = format!("{}/blocks", peer);
+        match client.post(&url).json(block).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                info!("Relayed block {} to {}", block_hash, peer);
+            }
+            Ok(resp) => {
+                // Peer might already have it (duplicate) - not an error
+                let status = resp.status();
+                if status != StatusCode::BAD_REQUEST {
+                    warn!("Relay to {} returned {}", peer, status);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to relay block to {}: {}", peer, e);
+            }
+        }
+    }
+}
+
+/// Relay a transaction to all known peers.
+async fn relay_transaction(tx: &Transaction, peers: &[String]) {
+    let client = reqwest::Client::new();
+    let tx_hash = &tx.hash_hex()[..16];
+
+    for peer in peers {
+        let url = format!("{}/tx/relay", peer);
+        match client.post(&url).json(tx).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                info!("Relayed transaction {} to {}", tx_hash, peer);
+            }
+            Ok(_) => {
+                // Peer might already have it - not an error
+            }
+            Err(e) => {
+                warn!("Failed to relay transaction to {}: {}", peer, e);
+            }
+        }
+    }
 }

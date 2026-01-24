@@ -19,7 +19,7 @@ const EXPLORER_HTML: &str = r#"<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quantum-Resistant Bitcoin Explorer</title>
+    <title>Postera Explorer</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -66,11 +66,14 @@ const EXPLORER_HTML: &str = r#"<!DOCTYPE html>
             background: #238636;
             color: white;
         }
+        .badge.pending {
+            background: #9e6a03;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>⚛️ Quantum-Resistant Bitcoin Explorer</h1>
+        <h1>Postera Explorer</h1>
 
         <input type="text" class="search" placeholder="Search by block hash or address..." id="search">
 
@@ -106,6 +109,24 @@ const EXPLORER_HTML: &str = r#"<!DOCTYPE html>
                 </thead>
                 <tbody id="blocks">
                     <tr><td colspan="4" class="loading">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <h2>Recent Transactions</h2>
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Hash</th>
+                        <th>From</th>
+                        <th>To</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="transactions">
+                    <tr><td colspan="5" class="loading">Loading...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -145,6 +166,25 @@ const EXPLORER_HTML: &str = r#"<!DOCTYPE html>
                         <td>${new Date(b.timestamp * 1000).toLocaleString()}</td>
                     </tr>
                 `).join('');
+
+                // Fetch recent transactions
+                const txRes = await fetch('/transactions/recent');
+                const transactions = await txRes.json();
+
+                const txBody = document.getElementById('transactions');
+                if (transactions.length === 0) {
+                    txBody.innerHTML = '<tr><td colspan="5" class="loading">No transactions yet</td></tr>';
+                } else {
+                    txBody.innerHTML = transactions.map(tx => `
+                        <tr>
+                            <td class="hash">${tx.hash.substring(0, 16)}...</td>
+                            <td class="hash">${tx.is_coinbase ? 'Coinbase' : tx.from.substring(0, 12) + '...'}</td>
+                            <td class="hash">${tx.to.substring(0, 12)}...</td>
+                            <td>${tx.amount.toLocaleString()}</td>
+                            <td><span class="badge ${tx.status === 'pending' ? 'pending' : ''}">${tx.status}${tx.block_height !== null ? ' #' + tx.block_height : ''}</span></td>
+                        </tr>
+                    `).join('');
+                }
 
             } catch (e) {
                 console.error('Failed to fetch data:', e);

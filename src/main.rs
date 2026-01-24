@@ -131,15 +131,14 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_new_wallet(output: &str) -> anyhow::Result<()> {
-    println!("Generating new quantum-resistant wallet...");
+    println!("Generating new Postera wallet...");
     let wallet = Wallet::generate();
 
     wallet.save(output)?;
 
     println!("Wallet saved to: {}", output);
     println!("Address: {}", wallet.address().to_hex());
-    println!("\nThis wallet uses CRYSTALS-Dilithium signatures,");
-    println!("providing resistance against quantum computer attacks.");
+    println!("\nThis wallet uses CRYSTALS-Dilithium post-quantum signatures.");
     Ok(())
 }
 
@@ -268,7 +267,7 @@ fn cmd_mine(address: &str, blocks: u64, difficulty: u64) -> anyhow::Result<()> {
 }
 
 async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64, mine: Option<String>) -> anyhow::Result<()> {
-    use postera::network::{AppState, sync_from_peer, sync_loop, broadcast_block};
+    use postera::network::{AppState, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
     use postera::consensus::mine_block;
     use std::sync::RwLock;
 
@@ -296,11 +295,15 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64
     let state = Arc::new(AppState {
         blockchain: RwLock::new(blockchain),
         mempool: RwLock::new(mempool),
+        peers: RwLock::new(peers.clone()),
     });
 
     // Create router with API and explorer
     let app = create_router(state.clone())
         .nest("/explorer", postera::explorer::create_explorer_router());
+
+    // Build our own URL for peer announcements
+    let our_url = format!("http://localhost:{}", port);
 
     // Sync from peers on startup
     if !peers.is_empty() {
@@ -308,6 +311,20 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64
         println!("Syncing from peers...");
 
         for peer in &peers {
+            // Announce ourselves to this peer
+            if let Ok(discovered) = announce_to_peer(&our_url, peer).await {
+                if !discovered.is_empty() {
+                    println!("  Discovered {} peers from {}", discovered.len(), peer);
+                    // Add discovered peers to our list
+                    let mut our_peers = state.peers.write().unwrap();
+                    for p in discovered {
+                        if !our_peers.contains(&p) && p != our_url {
+                            our_peers.push(p);
+                        }
+                    }
+                }
+            }
+
             match sync_from_peer(state.clone(), peer).await {
                 Ok(n) => {
                     if n > 0 {
@@ -324,9 +341,15 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64
 
         // Start background sync loop (checks every 30 seconds)
         let sync_state = state.clone();
-        let sync_peers = peers.clone();
+        let sync_peers = state.peers.read().unwrap().clone();
         tokio::spawn(async move {
             sync_loop(sync_state, sync_peers, 30).await;
+        });
+
+        // Start peer discovery loop (checks every 60 seconds)
+        let discovery_state = state.clone();
+        tokio::spawn(async move {
+            discovery_loop(discovery_state, 60).await;
         });
     }
 
@@ -334,7 +357,6 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64
     if let Some(miner_addr) = mine {
         let miner_address = Address::from_hex(&miner_addr)?;
         let mine_state = state.clone();
-        let mine_peers = peers.clone();
 
         tokio::spawn(async move {
             println!("Starting integrated miner...");
@@ -352,11 +374,12 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64
                     chain.create_block_template(miner_address, mempool_txs)
                 };
 
-                let height = {
-                    mine_state.blockchain.read().unwrap().height() + 1
+                let (height, difficulty) = {
+                    let chain = mine_state.blockchain.read().unwrap();
+                    (chain.height() + 1, block.header.difficulty)
                 };
 
-                println!("Mining block {}...", height);
+                println!("Mining block {} (difficulty: {})...", height, difficulty);
 
                 // Mine in a blocking task to not block the async runtime
                 let mined_block = tokio::task::spawn_blocking(move || {
@@ -385,6 +408,12 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64
 
                             let mut mempool = mine_state.mempool.write().unwrap();
                             mempool.remove_confirmed(&tx_hashes);
+
+                            // Re-validate remaining mempool transactions
+                            let removed = mempool.revalidate(chain.state());
+                            if removed > 0 {
+                                println!("  Removed {} invalid transactions from mempool", removed);
+                            }
                         }
                         Err(e) => {
                             println!("Failed to add mined block: {}", e);
@@ -393,9 +422,10 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64
                     }
                 }
 
-                // Broadcast to peers
-                if !mine_peers.is_empty() {
-                    broadcast_block(&mined_block, &mine_peers).await;
+                // Broadcast to peers (use current peer list for newly discovered peers)
+                let current_peers = mine_state.peers.read().unwrap().clone();
+                if !current_peers.is_empty() {
+                    broadcast_block(&mined_block, &current_peers).await;
                 }
             }
         });

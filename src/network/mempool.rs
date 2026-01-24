@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::core::Transaction;
+use crate::core::{State, Transaction};
 
 /// The mempool holds pending transactions waiting to be mined.
 #[derive(Debug, Default)]
@@ -68,6 +68,32 @@ impl Mempool {
     /// Clear all transactions.
     pub fn clear(&mut self) {
         self.transactions.clear();
+    }
+
+    /// Re-validate all transactions against the current chain state.
+    /// Returns the number of transactions removed.
+    pub fn revalidate(&mut self, state: &State) -> usize {
+        let mut invalid_hashes = Vec::new();
+
+        // Check each transaction against current state
+        for (hash, tx) in &self.transactions {
+            if state.validate_transaction(tx).is_err() {
+                invalid_hashes.push(*hash);
+            }
+        }
+
+        // Remove invalid transactions
+        let removed = invalid_hashes.len();
+        for hash in invalid_hashes {
+            self.transactions.remove(&hash);
+        }
+
+        removed
+    }
+
+    /// Get all transaction hashes.
+    pub fn get_hashes(&self) -> Vec<[u8; 32]> {
+        self.transactions.keys().cloned().collect()
     }
 }
 

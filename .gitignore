@@ -6,6 +6,9 @@ wallets/
 # Build artifacts
 target/
 
+# Blockchain data
+data/
+
 # IDE
 .idea/
 .vscode/
@@ -14,3 +17,6 @@ target/
 
 # OS
 .DS_Store
+
+# Claude Code
+.claude/

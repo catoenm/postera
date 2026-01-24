@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::consensus::{
+    calculate_next_difficulty, should_adjust_difficulty, ADJUSTMENT_INTERVAL, MIN_DIFFICULTY,
+};
 use crate::crypto::Address;
 use crate::storage::Database;
 
@@ -22,6 +25,8 @@ pub struct Blockchain {
     difficulty: u64,
     /// Optional persistent storage
     db: Option<Arc<Database>>,
+    /// Orphan blocks (blocks whose parent we don't have yet)
+    orphans: HashMap<[u8; 32], Block>,
 }
 
 impl Blockchain {
@@ -39,6 +44,7 @@ impl Blockchain {
             state: State::new(),
             difficulty,
             db: None,
+            orphans: HashMap::new(),
         }
     }
 
@@ -96,6 +102,7 @@ impl Blockchain {
                 state,
                 difficulty: stored_difficulty,
                 db: Some(db),
+                orphans: HashMap::new(),
             })
         } else {
             // Create new chain with genesis block
@@ -119,6 +126,7 @@ impl Blockchain {
                 state: State::new(),
                 difficulty,
                 db: Some(db),
+                orphans: HashMap::new(),
             })
         }
     }
@@ -131,6 +139,48 @@ impl Blockchain {
     /// Get the current difficulty.
     pub fn difficulty(&self) -> u64 {
         self.difficulty
+    }
+
+    /// Calculate the next block's difficulty based on recent block times.
+    /// This implements dynamic difficulty adjustment targeting fast block times.
+    pub fn next_difficulty(&self) -> u64 {
+        let height = self.height();
+
+        // Don't adjust until we have enough blocks
+        if height < ADJUSTMENT_INTERVAL {
+            return self.difficulty.max(MIN_DIFFICULTY);
+        }
+
+        // Check if this is an adjustment point
+        if should_adjust_difficulty(height + 1) {
+            // Get the timestamps from the adjustment window
+            let window_start = height + 1 - ADJUSTMENT_INTERVAL;
+            let first_block = self.get_block_by_height(window_start);
+            let last_block = self.get_block_by_height(height);
+
+            if let (Some(first), Some(last)) = (first_block, last_block) {
+                let new_difficulty = calculate_next_difficulty(
+                    self.difficulty,
+                    first.header.timestamp,
+                    last.header.timestamp,
+                    ADJUSTMENT_INTERVAL,
+                );
+
+                return new_difficulty;
+            }
+        }
+
+        self.difficulty.max(MIN_DIFFICULTY)
+    }
+
+    /// Get timestamps of recent blocks (for difficulty stats).
+    pub fn recent_timestamps(&self, count: usize) -> Vec<u64> {
+        let start = self.height_index.len().saturating_sub(count);
+        self.height_index[start..]
+            .iter()
+            .filter_map(|hash| self.blocks.get(hash))
+            .map(|block| block.header.timestamp)
+            .collect()
     }
 
     /// Get the latest block hash.
@@ -180,8 +230,9 @@ impl Blockchain {
         // Check block structure and proof-of-work
         block.verify().map_err(BlockchainError::BlockError)?;
 
-        // Check difficulty
-        if block.header.difficulty != self.difficulty {
+        // Check difficulty - must match the expected next difficulty
+        let expected_difficulty = self.next_difficulty();
+        if block.header.difficulty != expected_difficulty {
             return Err(BlockchainError::InvalidDifficulty);
         }
 
@@ -241,9 +292,16 @@ impl Blockchain {
         let hash = block.hash();
         let new_height = self.height_index.len() as u64;
 
+        // Update difficulty to the block's difficulty (it was validated)
+        self.difficulty = block.header.difficulty;
+
         // Persist to disk if we have a database
         if let Some(ref db) = self.db {
             db.save_block(&block, new_height)
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+
+            // Also persist the updated difficulty
+            db.set_metadata("difficulty", &self.difficulty.to_string())
                 .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
         }
 
@@ -253,7 +311,163 @@ impl Blockchain {
         Ok(())
     }
 
+    /// Try to add a block, handling orphans and potential chain reorganizations.
+    /// Returns Ok(true) if block was added to main chain, Ok(false) if stored as orphan.
+    pub fn try_add_block(&mut self, block: Block) -> Result<bool, BlockchainError> {
+        let block_hash = block.hash();
+
+        // Already have this block?
+        if self.blocks.contains_key(&block_hash) {
+            return Ok(false);
+        }
+
+        // Does it extend our current chain?
+        if block.header.prev_hash == self.latest_hash() {
+            // Normal case: extends the tip
+            self.add_block(block)?;
+            // Check if any orphans can now be connected
+            self.process_orphans()?;
+            return Ok(true);
+        }
+
+        // Do we have the parent block?
+        if !self.blocks.contains_key(&block.header.prev_hash) {
+            // Parent not found - store as orphan
+            self.orphans.insert(block_hash, block);
+            return Ok(false);
+        }
+
+        // We have the parent but it's not our tip - this is a potential fork
+        // Calculate the height of this block's chain
+        let fork_height = self.calculate_chain_height(&block);
+        let current_height = self.height();
+
+        if fork_height > current_height {
+            // The fork is longer - reorganize
+            self.reorganize_to_block(block)?;
+            self.process_orphans()?;
+            return Ok(true);
+        }
+
+        // Fork is not longer - store block but don't switch
+        // (Could be useful if it becomes longer later)
+        self.blocks.insert(block_hash, block);
+        Ok(false)
+    }
+
+    /// Calculate the height a block would have if added.
+    fn calculate_chain_height(&self, block: &Block) -> u64 {
+        let mut height = 1u64;
+        let mut prev_hash = block.header.prev_hash;
+
+        while let Some(parent) = self.blocks.get(&prev_hash) {
+            height += 1;
+            if parent.header.prev_hash == [0u8; 32] {
+                break; // Reached genesis
+            }
+            prev_hash = parent.header.prev_hash;
+        }
+
+        height
+    }
+
+    /// Process orphan blocks to see if any can now be connected.
+    fn process_orphans(&mut self) -> Result<(), BlockchainError> {
+        let mut connected = true;
+
+        while connected {
+            connected = false;
+            let orphan_hashes: Vec<[u8; 32]> = self.orphans.keys().cloned().collect();
+
+            for hash in orphan_hashes {
+                if let Some(orphan) = self.orphans.get(&hash).cloned() {
+                    // Can we connect this orphan now?
+                    if orphan.header.prev_hash == self.latest_hash() {
+                        self.orphans.remove(&hash);
+                        if self.add_block(orphan).is_ok() {
+                            connected = true;
+                        }
+                    } else if self.blocks.contains_key(&orphan.header.prev_hash) {
+                        // Parent exists but not at tip - check if fork is longer
+                        let fork_height = self.calculate_chain_height(&orphan);
+                        if fork_height > self.height() {
+                            self.orphans.remove(&hash);
+                            self.reorganize_to_block(orphan)?;
+                            connected = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reorganize the chain to include the given block.
+    /// This rebuilds state from genesis along the new chain path.
+    fn reorganize_to_block(&mut self, new_tip: Block) -> Result<(), BlockchainError> {
+        // Build the new chain path from genesis to new_tip
+        let mut new_chain: Vec<Block> = vec![new_tip.clone()];
+        let mut prev_hash = new_tip.header.prev_hash;
+
+        while prev_hash != [0u8; 32] {
+            if let Some(block) = self.blocks.get(&prev_hash).cloned() {
+                prev_hash = block.header.prev_hash;
+                new_chain.push(block);
+            } else {
+                return Err(BlockchainError::InvalidPrevHash);
+            }
+        }
+
+        new_chain.reverse(); // Now ordered from genesis to new_tip
+
+        // Rebuild state from genesis
+        let mut new_state = State::new();
+        let mut new_height_index = Vec::new();
+        let mut new_difficulty = self.difficulty;
+
+        for block in &new_chain {
+            // Validate and apply each block
+            for tx in &block.transactions {
+                new_state
+                    .apply_transaction(tx)
+                    .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
+            }
+            new_height_index.push(block.hash());
+            new_difficulty = block.header.difficulty;
+        }
+
+        // Add the new tip to our blocks
+        let new_tip_hash = new_tip.hash();
+        self.blocks.insert(new_tip_hash, new_tip);
+
+        // Persist new chain to disk if we have a database
+        if let Some(ref db) = self.db {
+            for (height, hash) in new_height_index.iter().enumerate() {
+                if let Some(block) = self.blocks.get(hash) {
+                    db.save_block(block, height as u64)
+                        .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+                }
+            }
+            db.set_metadata("difficulty", &new_difficulty.to_string())
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+        }
+
+        // Switch to new chain
+        self.state = new_state;
+        self.height_index = new_height_index;
+        self.difficulty = new_difficulty;
+
+        Ok(())
+    }
+
+    /// Get the number of orphan blocks.
+    pub fn orphan_count(&self) -> usize {
+        self.orphans.len()
+    }
+
     /// Create a new block template for mining.
+    /// Uses the dynamically calculated next difficulty.
     pub fn create_block_template(
         &self,
         miner_address: Address,
@@ -265,7 +479,8 @@ impl Blockchain {
         let mut txs = vec![coinbase];
         txs.extend(transactions);
 
-        Block::new(self.latest_hash(), txs, self.difficulty)
+        // Use the dynamically calculated difficulty for the next block
+        Block::new(self.latest_hash(), txs, self.next_difficulty())
     }
 
     /// Get chain info for API responses.
@@ -274,6 +489,7 @@ impl Blockchain {
             height: self.height(),
             latest_hash: hex::encode(self.latest_hash()),
             difficulty: self.difficulty,
+            next_difficulty: self.next_difficulty(),
             total_accounts: self.state.account_count() as u64,
         }
     }
@@ -291,6 +507,7 @@ pub struct ChainInfo {
     pub height: u64,
     pub latest_hash: String,
     pub difficulty: u64,
+    pub next_difficulty: u64,
     pub total_accounts: u64,
 }
 
