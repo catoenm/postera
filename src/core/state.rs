@@ -136,6 +136,14 @@ impl State {
     pub fn snapshot(&self) -> State {
         self.clone()
     }
+
+    /// Get top accounts by balance.
+    pub fn top_holders(&self, limit: usize) -> Vec<&Account> {
+        let mut accounts: Vec<_> = self.accounts.values().collect();
+        accounts.sort_by(|a, b| b.balance.cmp(&a.balance));
+        accounts.truncate(limit);
+        accounts
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

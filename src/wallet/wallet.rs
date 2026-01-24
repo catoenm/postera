@@ -58,6 +58,23 @@ impl Wallet {
         &self.keypair
     }
 
+    /// Get public key bytes.
+    pub fn public_key_bytes(&self) -> &[u8] {
+        self.keypair.public_key_bytes()
+    }
+
+    /// Get secret key bytes.
+    pub fn secret_key_bytes(&self) -> &[u8] {
+        self.keypair.secret_key_bytes()
+    }
+
+    /// Create wallet from public and secret key bytes.
+    pub fn from_keys(public_key: &[u8], secret_key: &[u8]) -> Result<Self, WalletError> {
+        let keypair = KeyPair::from_bytes(public_key, secret_key)
+            .map_err(|_| WalletError::InvalidKey)?;
+        Ok(Self { keypair })
+    }
+
     /// Create and sign a transaction.
     pub fn create_transaction(
         &self,

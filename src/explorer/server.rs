@@ -130,6 +130,23 @@ const EXPLORER_HTML: &str = r#"<!DOCTYPE html>
                 </tbody>
             </table>
         </div>
+
+        <h2>Top Holders</h2>
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Address</th>
+                        <th>Balance</th>
+                        <th>Transactions</th>
+                    </tr>
+                </thead>
+                <tbody id="holders">
+                    <tr><td colspan="4" class="loading">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 
     <script>
@@ -182,6 +199,24 @@ const EXPLORER_HTML: &str = r#"<!DOCTYPE html>
                             <td class="hash">${tx.to.substring(0, 12)}...</td>
                             <td>${tx.amount.toLocaleString()}</td>
                             <td><span class="badge ${tx.status === 'pending' ? 'pending' : ''}">${tx.status}${tx.block_height !== null ? ' #' + tx.block_height : ''}</span></td>
+                        </tr>
+                    `).join('');
+                }
+
+                // Fetch top holders
+                const holdersRes = await fetch('/accounts/top');
+                const holders = await holdersRes.json();
+
+                const holdersBody = document.getElementById('holders');
+                if (holders.length === 0) {
+                    holdersBody.innerHTML = '<tr><td colspan="4" class="loading">No accounts yet</td></tr>';
+                } else {
+                    holdersBody.innerHTML = holders.map((h, i) => `
+                        <tr>
+                            <td>${i + 1}</td>
+                            <td class="hash">${h.address}</td>
+                            <td>${(h.balance / 1000000000).toFixed(2)} coins</td>
+                            <td>${h.nonce}</td>
                         </tr>
                     `).join('');
                 }

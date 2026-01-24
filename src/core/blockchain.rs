@@ -534,11 +534,12 @@ pub enum BlockchainError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consensus::mine_block;
     use crate::crypto::KeyPair;
 
     #[test]
     fn test_new_blockchain() {
-        let chain = Blockchain::new(0);
+        let chain = Blockchain::new(MIN_DIFFICULTY);
 
         assert_eq!(chain.height(), 0);
         assert!(chain.get_block_by_height(0).is_some());
@@ -546,10 +547,11 @@ mod tests {
 
     #[test]
     fn test_add_valid_block() {
-        let mut chain = Blockchain::new(0); // 0 difficulty for fast tests
+        let mut chain = Blockchain::new(MIN_DIFFICULTY);
 
         let miner = KeyPair::generate();
-        let block = chain.create_block_template(miner.address(), vec![]);
+        let mut block = chain.create_block_template(miner.address(), vec![]);
+        mine_block(&mut block); // Mine to meet difficulty
 
         chain.add_block(block).unwrap();
 
@@ -559,11 +561,12 @@ mod tests {
 
     #[test]
     fn test_block_with_transaction() {
-        let mut chain = Blockchain::new(0);
+        let mut chain = Blockchain::new(MIN_DIFFICULTY);
 
         // First mine a block to get some coins
         let sender = KeyPair::generate();
-        let block1 = chain.create_block_template(sender.address(), vec![]);
+        let mut block1 = chain.create_block_template(sender.address(), vec![]);
+        mine_block(&mut block1);
         chain.add_block(block1).unwrap();
 
         // Now send some coins
@@ -571,7 +574,8 @@ mod tests {
         let tx = Transaction::create_signed(&sender, receiver.address(), 1000, 10, 0);
 
         let miner = KeyPair::generate();
-        let block2 = chain.create_block_template(miner.address(), vec![tx]);
+        let mut block2 = chain.create_block_template(miner.address(), vec![tx]);
+        mine_block(&mut block2);
         chain.add_block(block2).unwrap();
 
         assert_eq!(chain.height(), 2);
@@ -586,10 +590,10 @@ mod tests {
 
     #[test]
     fn test_invalid_prev_hash() {
-        let chain = Blockchain::new(0);
+        let chain = Blockchain::new(MIN_DIFFICULTY);
         let miner = KeyPair::generate();
 
-        let mut block = Block::new([99u8; 32], vec![], 0); // Wrong prev_hash
+        let mut block = Block::new([99u8; 32], vec![], MIN_DIFFICULTY);
         block.transactions = vec![Transaction::coinbase(miner.address(), BLOCK_REWARD)];
 
         let result = chain.validate_block(&block);

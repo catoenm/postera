@@ -5,7 +5,12 @@
       "Bash(cargo test:*)",
       "Bash(cargo run:*)",
       "Bash(cargo build:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(curl:*)",
+      "WebSearch",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(cat:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
