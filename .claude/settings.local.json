@@ -10,7 +10,16 @@
       "WebSearch",
       "WebFetch(domain:www.npmjs.com)",
       "WebFetch(domain:github.com)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(sh)",
+      "Bash(export PATH=\"$HOME/.fly/bin:$PATH\")",
+      "Bash(fly version:*)",
+      "Bash(fly auth login:*)",
+      "Bash(fly launch:*)",
+      "Bash(fly volumes create:*)",
+      "Bash(fly deploy:*)",
+      "Bash(rustc:*)",
+      "Bash(fly secrets set:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

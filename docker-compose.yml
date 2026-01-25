@@ -1,0 +1,51 @@
+# Docker Compose for local multi-node testing
+# Run with: docker-compose up
+
+version: '3.8'
+
+services:
+  node1:
+    build: .
+    ports:
+      - "8333:8080"
+    environment:
+      - POSTERA_PORT=8080
+      - POSTERA_DATA_DIR=/app/data
+      - POSTERA_MINE_ADDRESS=a5557ea2a7cd4b3a9a49d598599850c4f5639a6f
+      - RUST_LOG=info
+    volumes:
+      - node1_data:/app/data
+
+  node2:
+    build: .
+    ports:
+      - "8334:8080"
+    environment:
+      - POSTERA_PORT=8080
+      - POSTERA_DATA_DIR=/app/data
+      - POSTERA_SEEDS=http://node1:8080
+      - RUST_LOG=info
+    volumes:
+      - node2_data:/app/data
+    depends_on:
+      - node1
+
+  node3:
+    build: .
+    ports:
+      - "8335:8080"
+    environment:
+      - POSTERA_PORT=8080
+      - POSTERA_DATA_DIR=/app/data
+      - POSTERA_SEEDS=http://node1:8080,http://node2:8080
+      - RUST_LOG=info
+    volumes:
+      - node3_data:/app/data
+    depends_on:
+      - node1
+      - node2
+
+volumes:
+  node1_data:
+  node2_data:
+  node3_data:

@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use postera::config::{self, GENESIS_DIFFICULTY};
 use postera::consensus::mine_block;
 use postera::core::Blockchain;
 use postera::crypto::Address;
@@ -62,21 +63,21 @@ enum Commands {
     },
     /// Run a full node
     Node {
-        /// Port to listen on
-        #[arg(short, long, default_value = "8333")]
-        port: u16,
-        /// Peer nodes to connect to
+        /// Port to listen on (or set POSTERA_PORT env var)
+        #[arg(short, long)]
+        port: Option<u16>,
+        /// Peer nodes to connect to (in addition to seed nodes)
         #[arg(long)]
         peer: Vec<String>,
-        /// Data directory
-        #[arg(short, long, default_value = "./data")]
-        data_dir: String,
-        /// Mining difficulty (leading zero bits)
-        #[arg(long, default_value = "16")]
-        difficulty: u64,
-        /// Enable mining to this address (broadcasts blocks to peers)
+        /// Data directory (or set POSTERA_DATA_DIR env var)
+        #[arg(short, long)]
+        data_dir: Option<String>,
+        /// Enable mining to this address (or set POSTERA_MINE_ADDRESS env var)
         #[arg(long)]
         mine: Option<String>,
+        /// Disable connecting to seed nodes
+        #[arg(long)]
+        no_seeds: bool,
     },
 }
 
@@ -120,10 +121,23 @@ async fn main() -> anyhow::Result<()> {
             port,
             peer,
             data_dir,
-            difficulty,
             mine,
+            no_seeds,
         } => {
-            cmd_node(port, peer, &data_dir, difficulty, mine).await?;
+            // Use config defaults, with CLI/env overrides
+            let port = port.unwrap_or_else(config::get_port);
+            let data_dir = data_dir.unwrap_or_else(config::get_data_dir);
+            let mine = mine.or_else(config::get_mining_address);
+
+            // Combine seed nodes with CLI peers
+            let mut peers = if no_seeds {
+                Vec::new()
+            } else {
+                config::get_seed_nodes()
+            };
+            peers.extend(peer);
+
+            cmd_node(port, peers, &data_dir, mine).await?;
         }
     }
 
@@ -266,7 +280,7 @@ fn cmd_mine(address: &str, blocks: u64, difficulty: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64, mine: Option<String>) -> anyhow::Result<()> {
+async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine: Option<String>) -> anyhow::Result<()> {
     use postera::network::{AppState, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
     use postera::consensus::mine_block;
     use std::sync::RwLock;
@@ -278,18 +292,24 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, difficulty: u64
     println!("         Postera Node v0.1.0");
     println!("===========================================");
     println!();
-    println!("Difficulty:     {} leading zero bits", difficulty);
+    println!("Network:        {}", config::NETWORK_NAME);
+    println!("Genesis diff:   {} leading zero bits", GENESIS_DIFFICULTY);
     println!("Data directory: {}", data_dir);
-    println!("API endpoint:   http://localhost:{}", port);
+    println!("API endpoint:   http://0.0.0.0:{}", port);
     println!("Explorer:       http://localhost:{}/explorer", port);
+    println!("Wallet:         http://localhost:{}/wallet", port);
     if let Some(ref addr) = mine {
         println!("Mining to:      {}", addr);
+    }
+    if !peers.is_empty() {
+        println!("Seed peers:     {}", peers.len());
     }
     println!();
 
     // Initialize blockchain with persistence
+    // Always use GENESIS_DIFFICULTY for consistent genesis blocks
     let db_path = format!("{}/blockchain", data_dir);
-    let blockchain = Blockchain::open(&db_path, difficulty)?;
+    let blockchain = Blockchain::open(&db_path, GENESIS_DIFFICULTY)?;
     let mempool = Mempool::new();
 
     let state = Arc::new(AppState {

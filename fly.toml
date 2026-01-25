@@ -1,0 +1,37 @@
+# fly.toml app configuration file generated for postera-node on 2026-01-24T15:52:48-08:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'postera-node'
+primary_region = 'sjc'
+
+[build]
+
+[env]
+  POSTERA_DATA_DIR = '/app/data'
+  POSTERA_PORT = '8080'
+  RUST_LOG = 'info'
+
+[[mounts]]
+  source = 'postera_data'
+  destination = '/app/data'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '10s'
+    grace_period = '30s'
+    method = 'GET'
+    path = '/chain/info'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'

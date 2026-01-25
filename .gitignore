@@ -21,3 +21,9 @@ your-data/
 
 # Claude Code
 .claude/
+
+# Fly.io
+.fly/
+
+# Docker
+*.tar

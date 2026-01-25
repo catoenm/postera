@@ -1,7 +1,8 @@
-pub mod crypto;
-pub mod core;
+pub mod config;
 pub mod consensus;
+pub mod core;
+pub mod crypto;
+pub mod explorer;
 pub mod network;
 pub mod storage;
 pub mod wallet;
-pub mod explorer;
