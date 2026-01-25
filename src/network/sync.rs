@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tracing::{info, warn};
 
-use crate::core::Block;
+use crate::core::ShieldedBlock;
 
 use super::AppState;
 
@@ -36,7 +36,7 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
 
     // Fetch blocks we don't have
     let blocks_url = format!("{}/blocks/since/{}", peer_url, local_height);
-    let blocks: Vec<Block> = client
+    let blocks: Vec<ShieldedBlock> = client
         .get(&blocks_url)
         .send()
         .await?
@@ -62,7 +62,7 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
 }
 
 /// Broadcast a newly mined block to all peers.
-pub async fn broadcast_block(block: &Block, peers: &[String]) -> Vec<Result<(), SyncError>> {
+pub async fn broadcast_block(block: &ShieldedBlock, peers: &[String]) -> Vec<Result<(), SyncError>> {
     let client = reqwest::Client::new();
     let mut results = Vec::new();
 
@@ -119,7 +119,7 @@ struct PeerChainInfo {
     height: u64,
     latest_hash: String,
     difficulty: u64,
-    total_accounts: u64,
+    commitment_count: u64,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -1,14 +1,27 @@
-mod account;
+//! Core blockchain data structures.
+//!
+//! This module contains the fundamental types for the privacy-preserving blockchain:
+//! - ShieldedBlock: Block containing shielded transactions
+//! - ShieldedTransaction: Private transaction with zk-SNARK proofs
+//! - ShieldedState: Commitment tree and nullifier set (no visible balances)
+//! - CoinbaseTransaction: Mining reward transaction
+
 mod block;
 mod transaction;
 mod state;
 mod blockchain;
 
-pub use account::Account;
-pub use block::{Block, BlockError, BlockHeader, BLOCK_HASH_SIZE};
-pub use transaction::Transaction;
-pub use state::State;
-pub use blockchain::{Blockchain, ChainInfo};
+// Shielded types (primary)
+pub use block::{BlockError, BlockHeader, ShieldedBlock, BLOCK_HASH_SIZE};
+pub use transaction::{
+    BindingSignature, CoinbaseTransaction, LegacyTransaction, OutputDescription,
+    ShieldedTransaction, SpendDescription, TransactionError,
+};
+pub use state::{ShieldedState, StateError};
+pub use blockchain::{ShieldedBlockchain, ChainInfo};
+
+// Legacy types (for migration)
+pub use state::{Account, LegacyState};
 
 /// Compute the Merkle root of a list of transaction hashes.
 pub fn merkle_root(tx_hashes: &[[u8; 32]]) -> [u8; 32] {

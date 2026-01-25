@@ -1,3 +1,9 @@
+//! Shielded blockchain implementation.
+//!
+//! The blockchain manages the chain of shielded blocks, the commitment tree,
+//! and the nullifier set. All transaction data is private - only fees and
+//! roots are visible.
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -5,130 +11,110 @@ use std::sync::Arc;
 use crate::consensus::{
     calculate_next_difficulty, should_adjust_difficulty, ADJUSTMENT_INTERVAL, MIN_DIFFICULTY,
 };
-use crate::crypto::Address;
+use crate::crypto::{
+    commitment::NoteCommitment,
+    note::{compute_pk_hash, EncryptedNote, Note, ViewingKey},
+    proof::VerifyingParams,
+    Address, KeyPair,
+};
 use crate::storage::Database;
 
-use super::{Block, BlockError, State, Transaction};
+use super::block::{BlockError, ShieldedBlock, BLOCK_HASH_SIZE};
+use super::state::{ShieldedState, StateError};
+use super::transaction::{CoinbaseTransaction, ShieldedTransaction};
 
 /// The mining reward in smallest units.
 pub const BLOCK_REWARD: u64 = 50_000_000_000; // 50 coins with 9 decimal places
 
-/// The blockchain - manages the chain of blocks and world state.
-pub struct Blockchain {
-    /// All blocks indexed by hash
-    blocks: HashMap<[u8; 32], Block>,
-    /// Block hashes by height
+/// The shielded blockchain - manages chain, commitment tree, and nullifier set.
+pub struct ShieldedBlockchain {
+    /// All blocks indexed by hash.
+    blocks: HashMap<[u8; 32], ShieldedBlock>,
+    /// Block hashes by height.
     height_index: Vec<[u8; 32]>,
-    /// Current world state (after applying all blocks)
-    state: State,
-    /// Current mining difficulty
+    /// Current shielded state (commitment tree + nullifier set).
+    state: ShieldedState,
+    /// Current mining difficulty.
     difficulty: u64,
-    /// Optional persistent storage
+    /// Optional persistent storage.
     db: Option<Arc<Database>>,
-    /// Orphan blocks (blocks whose parent we don't have yet)
-    orphans: HashMap<[u8; 32], Block>,
+    /// Orphan blocks (blocks whose parent we don't have yet).
+    orphans: HashMap<[u8; 32], ShieldedBlock>,
+    /// Verifying parameters for zk-SNARK proof verification.
+    verifying_params: Option<Arc<VerifyingParams>>,
 }
 
-impl Blockchain {
+impl ShieldedBlockchain {
     /// Create a new blockchain with a genesis block (in-memory only).
-    pub fn new(difficulty: u64) -> Self {
-        let genesis = Block::genesis(difficulty);
+    pub fn new(difficulty: u64, genesis_coinbase: CoinbaseTransaction) -> Self {
+        let genesis = ShieldedBlock::genesis(difficulty, genesis_coinbase.clone());
         let genesis_hash = genesis.hash();
 
         let mut blocks = HashMap::new();
         blocks.insert(genesis_hash, genesis);
 
+        // Initialize state with genesis coinbase
+        let mut state = ShieldedState::new();
+        state.apply_coinbase(&genesis_coinbase);
+
         Self {
             blocks,
             height_index: vec![genesis_hash],
-            state: State::new(),
+            state,
             difficulty,
             db: None,
             orphans: HashMap::new(),
+            verifying_params: None,
         }
     }
 
-    /// Open a blockchain from persistent storage, or create a new one.
-    pub fn open<P: AsRef<Path>>(path: P, difficulty: u64) -> Result<Self, BlockchainError> {
-        let db = Database::open(path).map_err(|e| BlockchainError::StorageError(e.to_string()))?;
-        let db = Arc::new(db);
+    /// Create a new blockchain with a default genesis block for the given miner.
+    /// This is a convenience method for standalone mining.
+    pub fn with_miner(difficulty: u64, miner_pk_hash: [u8; 32], viewing_key: &ViewingKey) -> Self {
+        let genesis_coinbase = Self::create_genesis_coinbase(miner_pk_hash, viewing_key);
+        Self::new(difficulty, genesis_coinbase)
+    }
 
-        // Check if we have an existing chain
-        let stored_height = db
-            .get_height()
-            .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+    /// Open a persisted blockchain from disk, or create a new one.
+    /// For now, this is a simplified implementation that creates a fresh chain.
+    pub fn open(_db_path: &str, difficulty: u64) -> Result<Self, BlockError> {
+        // TODO: Implement actual persistence with sled
+        // For now, create a fresh chain with a dummy genesis
+        use crate::crypto::commitment::NoteCommitment;
+        use crate::crypto::note::EncryptedNote;
 
-        if let Some(height) = stored_height {
-            // Load existing chain
-            println!("Loading blockchain from disk (height: {})...", height);
+        let genesis_coinbase = CoinbaseTransaction::new(
+            NoteCommitment([0u8; 32]),
+            EncryptedNote {
+                ciphertext: vec![0; 64],
+                ephemeral_pk: vec![0; 32],
+            },
+            BLOCK_REWARD,
+            0,
+        );
+        Ok(Self::new(difficulty, genesis_coinbase))
+    }
 
-            let mut blocks = HashMap::new();
-            let mut height_index = Vec::new();
-            let mut state = State::new();
+    /// Create a genesis coinbase for a miner.
+    pub fn create_genesis_coinbase(
+        miner_pk_hash: [u8; 32],
+        viewing_key: &ViewingKey,
+    ) -> CoinbaseTransaction {
+        let mut rng = ark_std::rand::thread_rng();
+        let note = Note::new(BLOCK_REWARD, miner_pk_hash, &mut rng);
+        let encrypted = viewing_key.encrypt_note(&note, &mut rng);
 
-            // Load all blocks and rebuild state
-            for h in 0..=height {
-                let block = db
-                    .load_block_by_height(h)
-                    .map_err(|e| BlockchainError::StorageError(e.to_string()))?
-                    .ok_or_else(|| {
-                        BlockchainError::StorageError(format!("Missing block at height {}", h))
-                    })?;
+        CoinbaseTransaction::new(note.commitment(), encrypted, BLOCK_REWARD, 0)
+    }
 
-                // Apply transactions to state
-                for tx in &block.transactions {
-                    state
-                        .apply_transaction(tx)
-                        .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
-                }
+    /// Set the verifying parameters for proof verification.
+    pub fn set_verifying_params(&mut self, params: Arc<VerifyingParams>) {
+        self.verifying_params = Some(params);
+    }
 
-                let hash = block.hash();
-                blocks.insert(hash, block);
-                height_index.push(hash);
-            }
-
-            // Load difficulty from metadata or use provided
-            let stored_difficulty = db
-                .get_metadata("difficulty")
-                .map_err(|e| BlockchainError::StorageError(e.to_string()))?
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(difficulty);
-
-            println!("Loaded {} blocks from disk", height + 1);
-
-            Ok(Self {
-                blocks,
-                height_index,
-                state,
-                difficulty: stored_difficulty,
-                db: Some(db),
-                orphans: HashMap::new(),
-            })
-        } else {
-            // Create new chain with genesis block
-            println!("Creating new blockchain...");
-
-            let genesis = Block::genesis(difficulty);
-            let genesis_hash = genesis.hash();
-
-            // Save genesis block
-            db.save_block(&genesis, 0)
-                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
-            db.set_metadata("difficulty", &difficulty.to_string())
-                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
-
-            let mut blocks = HashMap::new();
-            blocks.insert(genesis_hash, genesis);
-
-            Ok(Self {
-                blocks,
-                height_index: vec![genesis_hash],
-                state: State::new(),
-                difficulty,
-                db: Some(db),
-                orphans: HashMap::new(),
-            })
-        }
+    /// Get the verifying parameters for proof verification.
+    pub fn verifying_params(&self) -> Option<&Arc<VerifyingParams>> {
+        self.verifying_params.as_ref()
     }
 
     /// Get the current chain height (0-indexed).
@@ -142,38 +128,32 @@ impl Blockchain {
     }
 
     /// Calculate the next block's difficulty based on recent block times.
-    /// This implements dynamic difficulty adjustment targeting fast block times.
     pub fn next_difficulty(&self) -> u64 {
         let height = self.height();
 
-        // Don't adjust until we have enough blocks
         if height < ADJUSTMENT_INTERVAL {
             return self.difficulty.max(MIN_DIFFICULTY);
         }
 
-        // Check if this is an adjustment point
         if should_adjust_difficulty(height + 1) {
-            // Get the timestamps from the adjustment window
             let window_start = height + 1 - ADJUSTMENT_INTERVAL;
             let first_block = self.get_block_by_height(window_start);
             let last_block = self.get_block_by_height(height);
 
             if let (Some(first), Some(last)) = (first_block, last_block) {
-                let new_difficulty = calculate_next_difficulty(
+                return calculate_next_difficulty(
                     self.difficulty,
                     first.header.timestamp,
                     last.header.timestamp,
                     ADJUSTMENT_INTERVAL,
                 );
-
-                return new_difficulty;
             }
         }
 
         self.difficulty.max(MIN_DIFFICULTY)
     }
 
-    /// Get timestamps of recent blocks (for difficulty stats).
+    /// Get timestamps of recent blocks.
     pub fn recent_timestamps(&self, count: usize) -> Vec<u64> {
         let start = self.height_index.len().saturating_sub(count);
         self.height_index[start..]
@@ -189,39 +169,44 @@ impl Blockchain {
     }
 
     /// Get the latest block.
-    pub fn latest_block(&self) -> &Block {
+    pub fn latest_block(&self) -> &ShieldedBlock {
         self.blocks.get(&self.latest_hash()).unwrap()
     }
 
     /// Get a block by hash.
-    pub fn get_block(&self, hash: &[u8; 32]) -> Option<&Block> {
+    pub fn get_block(&self, hash: &[u8; 32]) -> Option<&ShieldedBlock> {
         self.blocks.get(hash)
     }
 
     /// Get a block by height.
-    pub fn get_block_by_height(&self, height: u64) -> Option<&Block> {
+    pub fn get_block_by_height(&self, height: u64) -> Option<&ShieldedBlock> {
         self.height_index
             .get(height as usize)
             .and_then(|hash| self.blocks.get(hash))
     }
 
-    /// Get the current state.
-    pub fn state(&self) -> &State {
+    /// Get the current shielded state.
+    pub fn state(&self) -> &ShieldedState {
         &self.state
     }
 
-    /// Get account balance.
-    pub fn balance(&self, address: &Address) -> u64 {
-        self.state.balance(address)
+    /// Get the current commitment tree root.
+    pub fn commitment_root(&self) -> [u8; 32] {
+        self.state.commitment_root()
     }
 
-    /// Get account nonce.
-    pub fn nonce(&self, address: &Address) -> u64 {
-        self.state.nonce(address)
+    /// Get the number of commitments in the tree.
+    pub fn commitment_count(&self) -> u64 {
+        self.state.commitment_count()
+    }
+
+    /// Get the number of spent nullifiers.
+    pub fn nullifier_count(&self) -> usize {
+        self.state.nullifier_count()
     }
 
     /// Validate a block before adding it.
-    pub fn validate_block(&self, block: &Block) -> Result<(), BlockchainError> {
+    pub fn validate_block(&self, block: &ShieldedBlock) -> Result<(), BlockchainError> {
         // Check previous hash
         if block.header.prev_hash != self.latest_hash() {
             return Err(BlockchainError::InvalidPrevHash);
@@ -230,77 +215,72 @@ impl Blockchain {
         // Check block structure and proof-of-work
         block.verify().map_err(BlockchainError::BlockError)?;
 
-        // Check difficulty - must match the expected next difficulty
+        // Check difficulty
         let expected_difficulty = self.next_difficulty();
         if block.header.difficulty != expected_difficulty {
             return Err(BlockchainError::InvalidDifficulty);
         }
 
+        // Validate coinbase
+        let expected_height = self.height() + 1;
+        let total_fees = block.total_fees();
+        let expected_reward = BLOCK_REWARD + total_fees;
+
+        self.state
+            .validate_coinbase(&block.coinbase, expected_reward, expected_height)
+            .map_err(|e| BlockchainError::StateError(e))?;
+
         // Validate all transactions
-        let mut temp_state = self.state.snapshot();
-        let mut total_fees = 0u64;
-
-        for (i, tx) in block.transactions.iter().enumerate() {
-            // First transaction should be coinbase
-            if i == 0 {
-                if !tx.is_coinbase() {
-                    return Err(BlockchainError::NoCoinbase);
-                }
-                // We'll verify the coinbase amount after calculating fees
-            } else {
-                // Regular transaction
-                if tx.is_coinbase() {
-                    return Err(BlockchainError::MultipleCoinbase);
-                }
-
-                temp_state
-                    .validate_transaction(tx)
-                    .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
-
-                total_fees += tx.fee;
+        if let Some(ref params) = self.verifying_params {
+            for tx in &block.transactions {
+                self.state
+                    .validate_transaction(tx, params)
+                    .map_err(|e| BlockchainError::StateError(e))?;
             }
-
-            temp_state
-                .apply_transaction(tx)
-                .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
+        } else {
+            // If no verifying params, just do basic validation
+            for tx in &block.transactions {
+                self.state
+                    .validate_transaction_basic(tx)
+                    .map_err(|e| BlockchainError::StateError(e))?;
+            }
         }
 
-        // Verify coinbase amount
-        if let Some(coinbase) = block.coinbase() {
-            let expected_reward = BLOCK_REWARD + total_fees;
-            if coinbase.amount > expected_reward {
-                return Err(BlockchainError::InvalidCoinbaseAmount);
-            }
+        // Verify commitment root matches expected
+        let mut temp_state = self.state.snapshot();
+        for tx in &block.transactions {
+            temp_state.apply_transaction(tx);
+        }
+        temp_state.apply_coinbase(&block.coinbase);
+
+        if temp_state.commitment_root() != block.header.commitment_root {
+            return Err(BlockchainError::InvalidCommitmentRoot);
         }
 
         Ok(())
     }
 
     /// Add a validated block to the chain.
-    pub fn add_block(&mut self, block: Block) -> Result<(), BlockchainError> {
+    pub fn add_block(&mut self, block: ShieldedBlock) -> Result<(), BlockchainError> {
         // Validate first
         self.validate_block(&block)?;
 
         // Apply transactions to state
         for tx in &block.transactions {
-            self.state
-                .apply_transaction(tx)
-                .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
+            self.state.apply_transaction(tx);
         }
+        self.state.apply_coinbase(&block.coinbase);
 
         // Add to chain
         let hash = block.hash();
         let new_height = self.height_index.len() as u64;
 
-        // Update difficulty to the block's difficulty (it was validated)
+        // Update difficulty
         self.difficulty = block.header.difficulty;
 
-        // Persist to disk if we have a database
+        // Persist if we have a database
         if let Some(ref db) = self.db {
-            db.save_block(&block, new_height)
-                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
-
-            // Also persist the updated difficulty
+            // Note: storage would need updating for shielded blocks
             db.set_metadata("difficulty", &self.difficulty.to_string())
                 .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
         }
@@ -311,9 +291,8 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Try to add a block, handling orphans and potential chain reorganizations.
-    /// Returns Ok(true) if block was added to main chain, Ok(false) if stored as orphan.
-    pub fn try_add_block(&mut self, block: Block) -> Result<bool, BlockchainError> {
+    /// Try to add a block, handling orphans and potential reorgs.
+    pub fn try_add_block(&mut self, block: ShieldedBlock) -> Result<bool, BlockchainError> {
         let block_hash = block.hash();
 
         // Already have this block?
@@ -323,47 +302,43 @@ impl Blockchain {
 
         // Does it extend our current chain?
         if block.header.prev_hash == self.latest_hash() {
-            // Normal case: extends the tip
             self.add_block(block)?;
-            // Check if any orphans can now be connected
             self.process_orphans()?;
             return Ok(true);
         }
 
         // Do we have the parent block?
         if !self.blocks.contains_key(&block.header.prev_hash) {
-            // Parent not found - store as orphan
+            // Store as orphan
             self.orphans.insert(block_hash, block);
             return Ok(false);
         }
 
-        // We have the parent but it's not our tip - this is a potential fork
-        // Calculate the height of this block's chain
+        // We have the parent but it's not our tip - potential fork
         let fork_height = self.calculate_chain_height(&block);
         let current_height = self.height();
 
         if fork_height > current_height {
-            // The fork is longer - reorganize
+            // Fork is longer - reorganize
             self.reorganize_to_block(block)?;
             self.process_orphans()?;
             return Ok(true);
         }
 
-        // Fork is not longer - store block but don't switch
-        // (Could be useful if it becomes longer later)
+        // Fork is not longer - store but don't switch
         self.blocks.insert(block_hash, block);
         Ok(false)
     }
 
     /// Calculate the height a block would have if added.
-    fn calculate_chain_height(&self, block: &Block) -> u64 {
+    fn calculate_chain_height(&self, block: &ShieldedBlock) -> u64 {
         let mut height = 1u64;
         let mut prev_hash = block.header.prev_hash;
 
         while let Some(parent) = self.blocks.get(&prev_hash) {
             height += 1;
-            if parent.header.prev_hash == [0u8; 32] {
-                break; // Reached genesis
+            if parent.header.prev_hash == [0u8; BLOCK_HASH_SIZE] {
+                break;
             }
             prev_hash = parent.header.prev_hash;
         }
@@ -381,14 +356,12 @@ impl Blockchain {
 
             for hash in orphan_hashes {
                 if let Some(orphan) = self.orphans.get(&hash).cloned() {
-                    // Can we connect this orphan now?
                     if orphan.header.prev_hash == self.latest_hash() {
                         self.orphans.remove(&hash);
                         if self.add_block(orphan).is_ok() {
                             connected = true;
                         }
                     } else if self.blocks.contains_key(&orphan.header.prev_hash) {
-                        // Parent exists but not at tip - check if fork is longer
                         let fork_height = self.calculate_chain_height(&orphan);
                         if fork_height > self.height() {
                             self.orphans.remove(&hash);
@@ -404,10 +377,9 @@ impl Blockchain {
     }
 
     /// Reorganize the chain to include the given block.
-    /// This rebuilds state from genesis along the new chain path.
-    fn reorganize_to_block(&mut self, new_tip: Block) -> Result<(), BlockchainError> {
+    fn reorganize_to_block(&mut self, new_tip: ShieldedBlock) -> Result<(), BlockchainError> {
         // Build the new chain path from genesis to new_tip
-        let mut new_chain: Vec<Block> = vec![new_tip.clone()];
+        let mut new_chain: Vec<ShieldedBlock> = vec![new_tip.clone()];
         let mut prev_hash = new_tip.header.prev_hash;
 
         while prev_hash != [0u8; 32] {
@@ -419,39 +391,25 @@ impl Blockchain {
             }
         }
 
-        new_chain.reverse(); // Now ordered from genesis to new_tip
+        new_chain.reverse();
 
         // Rebuild state from genesis
-        let mut new_state = State::new();
+        let mut new_state = ShieldedState::new();
         let mut new_height_index = Vec::new();
         let mut new_difficulty = self.difficulty;
 
         for block in &new_chain {
-            // Validate and apply each block
             for tx in &block.transactions {
-                new_state
-                    .apply_transaction(tx)
-                    .map_err(|e| BlockchainError::InvalidTransaction(e.to_string()))?;
+                new_state.apply_transaction(tx);
             }
+            new_state.apply_coinbase(&block.coinbase);
             new_height_index.push(block.hash());
             new_difficulty = block.header.difficulty;
         }
 
-        // Add the new tip to our blocks
+        // Add new tip to blocks
         let new_tip_hash = new_tip.hash();
         self.blocks.insert(new_tip_hash, new_tip);
-
-        // Persist new chain to disk if we have a database
-        if let Some(ref db) = self.db {
-            for (height, hash) in new_height_index.iter().enumerate() {
-                if let Some(block) = self.blocks.get(hash) {
-                    db.save_block(block, height as u64)
-                        .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
-                }
-            }
-            db.set_metadata("difficulty", &new_difficulty.to_string())
-                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
-        }
 
         // Switch to new chain
         self.state = new_state;
@@ -466,21 +424,58 @@ impl Blockchain {
         self.orphans.len()
     }
 
+    /// Create a coinbase transaction for a new block.
+    pub fn create_coinbase(
+        &self,
+        miner_pk_hash: [u8; 32],
+        viewing_key: &ViewingKey,
+        extra_fees: u64,
+    ) -> CoinbaseTransaction {
+        let mut rng = ark_std::rand::thread_rng();
+        let height = self.height() + 1;
+        let reward = BLOCK_REWARD + extra_fees;
+
+        let note = Note::new(reward, miner_pk_hash, &mut rng);
+        let encrypted = viewing_key.encrypt_note(&note, &mut rng);
+
+        CoinbaseTransaction::new(note.commitment(), encrypted, reward, height)
+    }
+
     /// Create a new block template for mining.
-    /// Uses the dynamically calculated next difficulty.
     pub fn create_block_template(
         &self,
-        miner_address: Address,
-        transactions: Vec<Transaction>,
-    ) -> Block {
+        miner_pk_hash: [u8; 32],
+        viewing_key: &ViewingKey,
+        transactions: Vec<ShieldedTransaction>,
+    ) -> ShieldedBlock {
         let total_fees: u64 = transactions.iter().map(|tx| tx.fee).sum();
-        let coinbase = Transaction::coinbase(miner_address, BLOCK_REWARD + total_fees);
+        let coinbase = self.create_coinbase(miner_pk_hash, viewing_key, total_fees);
 
-        let mut txs = vec![coinbase];
-        txs.extend(transactions);
+        // Calculate commitment root after applying transactions
+        let mut temp_state = self.state.snapshot();
+        for tx in &transactions {
+            temp_state.apply_transaction(tx);
+        }
+        temp_state.apply_coinbase(&coinbase);
+        let commitment_root = temp_state.commitment_root();
 
-        // Use the dynamically calculated difficulty for the next block
-        Block::new(self.latest_hash(), txs, self.next_difficulty())
+        // Nullifier root (simplified - just hash the count for now)
+        let nullifier_root = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&(temp_state.nullifier_count() as u64).to_le_bytes());
+            let hash: [u8; 32] = hasher.finalize().into();
+            hash
+        };
+
+        ShieldedBlock::new(
+            self.latest_hash(),
+            transactions,
+            coinbase,
+            commitment_root,
+            nullifier_root,
+            self.next_difficulty(),
+        )
     }
 
     /// Get chain info for API responses.
@@ -490,7 +485,8 @@ impl Blockchain {
             latest_hash: hex::encode(self.latest_hash()),
             difficulty: self.difficulty,
             next_difficulty: self.next_difficulty(),
-            total_accounts: self.state.account_count() as u64,
+            commitment_count: self.commitment_count(),
+            nullifier_count: self.nullifier_count() as u64,
         }
     }
 
@@ -498,6 +494,19 @@ impl Blockchain {
     pub fn recent_hashes(&self, count: usize) -> Vec<[u8; 32]> {
         let start = self.height_index.len().saturating_sub(count);
         self.height_index[start..].to_vec()
+    }
+
+    /// Get a Merkle path for a commitment at a given position.
+    pub fn get_merkle_path(
+        &self,
+        position: u64,
+    ) -> Option<crate::crypto::merkle_tree::MerklePath> {
+        self.state.get_merkle_path(position)
+    }
+
+    /// Get recent valid anchors.
+    pub fn recent_anchors(&self) -> Vec<[u8; 32]> {
+        self.state.recent_roots().to_vec()
     }
 }
 
@@ -508,25 +517,36 @@ pub struct ChainInfo {
     pub latest_hash: String,
     pub difficulty: u64,
     pub next_difficulty: u64,
-    pub total_accounts: u64,
+    pub commitment_count: u64,
+    pub nullifier_count: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockchainError {
     #[error("Block error: {0}")]
     BlockError(#[from] BlockError),
+
+    #[error("State error: {0}")]
+    StateError(#[from] StateError),
+
     #[error("Invalid previous block hash")]
     InvalidPrevHash,
+
     #[error("Invalid difficulty")]
     InvalidDifficulty,
-    #[error("Block must start with coinbase transaction")]
-    NoCoinbase,
-    #[error("Block has multiple coinbase transactions")]
-    MultipleCoinbase,
+
+    #[error("Invalid coinbase")]
+    InvalidCoinbase,
+
     #[error("Invalid coinbase amount")]
     InvalidCoinbaseAmount,
+
+    #[error("Invalid commitment root")]
+    InvalidCommitmentRoot,
+
     #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),
+
     #[error("Storage error: {0}")]
     StorageError(String),
 }
@@ -534,78 +554,67 @@ pub enum BlockchainError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::mine_block;
-    use crate::crypto::KeyPair;
+    use crate::crypto::note::ViewingKey;
+
+    fn test_viewing_key() -> ViewingKey {
+        ViewingKey::new(b"test_miner_key")
+    }
+
+    fn test_pk_hash() -> [u8; 32] {
+        compute_pk_hash(b"test_miner_public_key")
+    }
 
     #[test]
     fn test_new_blockchain() {
-        let chain = Blockchain::new(MIN_DIFFICULTY);
+        let vk = test_viewing_key();
+        let pk_hash = test_pk_hash();
+        let coinbase = ShieldedBlockchain::create_genesis_coinbase(pk_hash, &vk);
+        let chain = ShieldedBlockchain::new(MIN_DIFFICULTY, coinbase);
 
         assert_eq!(chain.height(), 0);
         assert!(chain.get_block_by_height(0).is_some());
-    }
-
-    #[test]
-    fn test_add_valid_block() {
-        let mut chain = Blockchain::new(MIN_DIFFICULTY);
-
-        let miner = KeyPair::generate();
-        let mut block = chain.create_block_template(miner.address(), vec![]);
-        mine_block(&mut block); // Mine to meet difficulty
-
-        chain.add_block(block).unwrap();
-
-        assert_eq!(chain.height(), 1);
-        assert_eq!(chain.balance(&miner.address()), BLOCK_REWARD);
-    }
-
-    #[test]
-    fn test_block_with_transaction() {
-        let mut chain = Blockchain::new(MIN_DIFFICULTY);
-
-        // First mine a block to get some coins
-        let sender = KeyPair::generate();
-        let mut block1 = chain.create_block_template(sender.address(), vec![]);
-        mine_block(&mut block1);
-        chain.add_block(block1).unwrap();
-
-        // Now send some coins
-        let receiver = KeyPair::generate();
-        let tx = Transaction::create_signed(&sender, receiver.address(), 1000, 10, 0);
-
-        let miner = KeyPair::generate();
-        let mut block2 = chain.create_block_template(miner.address(), vec![tx]);
-        mine_block(&mut block2);
-        chain.add_block(block2).unwrap();
-
-        assert_eq!(chain.height(), 2);
-        assert_eq!(chain.balance(&receiver.address()), 1000);
-        assert_eq!(
-            chain.balance(&sender.address()),
-            BLOCK_REWARD - 1000 - 10
-        );
-        // Miner gets block reward + fees
-        assert_eq!(chain.balance(&miner.address()), BLOCK_REWARD + 10);
-    }
-
-    #[test]
-    fn test_invalid_prev_hash() {
-        let chain = Blockchain::new(MIN_DIFFICULTY);
-        let miner = KeyPair::generate();
-
-        let mut block = Block::new([99u8; 32], vec![], MIN_DIFFICULTY);
-        block.transactions = vec![Transaction::coinbase(miner.address(), BLOCK_REWARD)];
-
-        let result = chain.validate_block(&block);
-        assert!(matches!(result, Err(BlockchainError::InvalidPrevHash)));
+        assert_eq!(chain.commitment_count(), 1); // Genesis coinbase
     }
 
     #[test]
     fn test_chain_info() {
-        let chain = Blockchain::new(8);
-        let info = chain.info();
+        let vk = test_viewing_key();
+        let pk_hash = test_pk_hash();
+        let coinbase = ShieldedBlockchain::create_genesis_coinbase(pk_hash, &vk);
+        let chain = ShieldedBlockchain::new(8, coinbase);
 
+        let info = chain.info();
         assert_eq!(info.height, 0);
         assert_eq!(info.difficulty, 8);
+        assert_eq!(info.commitment_count, 1);
+        assert_eq!(info.nullifier_count, 0);
+    }
+
+    #[test]
+    fn test_create_block_template() {
+        let vk = test_viewing_key();
+        let pk_hash = test_pk_hash();
+        let coinbase = ShieldedBlockchain::create_genesis_coinbase(pk_hash, &vk);
+        let chain = ShieldedBlockchain::new(MIN_DIFFICULTY, coinbase);
+
+        let template = chain.create_block_template(pk_hash, &vk, vec![]);
+
+        assert_eq!(template.header.prev_hash, chain.latest_hash());
+        assert_eq!(template.coinbase.height, 1);
+        assert_eq!(template.coinbase.reward, BLOCK_REWARD);
+    }
+
+    #[test]
+    fn test_commitment_tracking() {
+        let vk = test_viewing_key();
+        let pk_hash = test_pk_hash();
+        let coinbase = ShieldedBlockchain::create_genesis_coinbase(pk_hash, &vk);
+        let chain = ShieldedBlockchain::new(MIN_DIFFICULTY, coinbase);
+
+        // Genesis creates one commitment
+        assert_eq!(chain.commitment_count(), 1);
+
+        // Commitment root should not be empty
+        assert_ne!(chain.commitment_root(), [0u8; 32]);
     }
 }

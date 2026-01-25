@@ -1,7 +1,20 @@
 mod keys;
 mod address;
 mod signature;
+pub mod commitment;
+pub mod nullifier;
+pub mod note;
+pub mod merkle_tree;
+pub mod proof;
+pub mod setup;
+pub mod circuits;
 
 pub use keys::KeyPair;
 pub use address::Address;
 pub use signature::{sign, verify, Signature};
+pub use commitment::{NoteCommitment, ValueCommitment, commit_to_value, commit_to_note};
+pub use nullifier::{Nullifier, NullifierKey, derive_nullifier};
+pub use note::{Note, EncryptedNote, ViewingKey};
+pub use merkle_tree::{CommitmentTree, MerklePath};
+pub use proof::{ZkProof, ProvingParams, VerifyingParams};
+pub use setup::{generate_parameters, load_parameters, save_parameters};

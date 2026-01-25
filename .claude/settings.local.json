@@ -34,7 +34,9 @@
       "Bash(lsof:*)",
       "Bash(kill:*)",
       "Bash(xargs ls:*)",
-      "Bash(~/.fly/bin/fly deploy:*)"
+      "Bash(~/.fly/bin/fly deploy:*)",
+      "Bash(~/.fly/bin/fly status:*)",
+      "Bash(~/.fly/bin/fly machines list:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

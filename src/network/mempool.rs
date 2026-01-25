@@ -1,37 +1,66 @@
-use std::collections::HashMap;
+//! Transaction mempool for shielded transactions.
 
-use crate::core::{State, Transaction};
+use std::collections::{HashMap, HashSet};
 
-/// The mempool holds pending transactions waiting to be mined.
+use crate::core::{ShieldedState, ShieldedTransaction};
+use crate::crypto::nullifier::Nullifier;
+
+/// The mempool holds pending shielded transactions waiting to be mined.
 #[derive(Debug, Default)]
 pub struct Mempool {
-    transactions: HashMap<[u8; 32], Transaction>,
+    /// Pending transactions by hash.
+    transactions: HashMap<[u8; 32], ShieldedTransaction>,
+    /// Pending nullifiers (to detect double-spends before confirmation).
+    pending_nullifiers: HashSet<Nullifier>,
 }
 
 impl Mempool {
     pub fn new() -> Self {
         Self {
             transactions: HashMap::new(),
+            pending_nullifiers: HashSet::new(),
         }
     }
 
     /// Add a transaction to the mempool.
-    pub fn add(&mut self, tx: Transaction) -> bool {
+    /// Returns false if transaction already exists or would cause double-spend.
+    pub fn add(&mut self, tx: ShieldedTransaction) -> bool {
         let hash = tx.hash();
         if self.transactions.contains_key(&hash) {
             return false;
         }
+
+        // Check for nullifier conflicts
+        for nullifier in tx.nullifiers() {
+            if self.pending_nullifiers.contains(nullifier) {
+                return false; // Double-spend attempt
+            }
+        }
+
+        // Add nullifiers to pending set
+        for nullifier in tx.nullifiers() {
+            self.pending_nullifiers.insert(*nullifier);
+        }
+
         self.transactions.insert(hash, tx);
         true
     }
 
     /// Remove a transaction from the mempool.
-    pub fn remove(&mut self, hash: &[u8; 32]) -> Option<Transaction> {
-        self.transactions.remove(hash)
+    pub fn remove(&mut self, hash: &[u8; 32]) -> Option<ShieldedTransaction> {
+        if let Some(tx) = self.transactions.remove(hash) {
+            // Remove associated nullifiers
+            for nullifier in tx.nullifiers() {
+                self.pending_nullifiers.remove(nullifier);
+            }
+            Some(tx)
+        } else {
+            None
+        }
     }
 
     /// Get a transaction by hash.
-    pub fn get(&self, hash: &[u8; 32]) -> Option<&Transaction> {
+    pub fn get(&self, hash: &[u8; 32]) -> Option<&ShieldedTransaction> {
         self.transactions.get(hash)
     }
 
@@ -40,8 +69,13 @@ impl Mempool {
         self.transactions.contains_key(hash)
     }
 
+    /// Check if a nullifier is pending in the mempool.
+    pub fn has_pending_nullifier(&self, nullifier: &Nullifier) -> bool {
+        self.pending_nullifiers.contains(nullifier)
+    }
+
     /// Get all transactions, sorted by fee (highest first).
-    pub fn get_transactions(&self, limit: usize) -> Vec<Transaction> {
+    pub fn get_transactions(&self, limit: usize) -> Vec<ShieldedTransaction> {
         let mut txs: Vec<_> = self.transactions.values().cloned().collect();
         txs.sort_by(|a, b| b.fee.cmp(&a.fee));
         txs.truncate(limit);
@@ -61,31 +95,60 @@ impl Mempool {
     /// Remove transactions that are now in a block.
     pub fn remove_confirmed(&mut self, tx_hashes: &[[u8; 32]]) {
         for hash in tx_hashes {
-            self.transactions.remove(hash);
+            self.remove(hash);
+        }
+    }
+
+    /// Remove transactions with nullifiers that are now spent on-chain.
+    pub fn remove_spent_nullifiers(&mut self, spent_nullifiers: &[Nullifier]) {
+        let mut to_remove = Vec::new();
+
+        for (hash, tx) in &self.transactions {
+            for nullifier in tx.nullifiers() {
+                if spent_nullifiers.contains(nullifier) {
+                    to_remove.push(*hash);
+                    break;
+                }
+            }
+        }
+
+        for hash in to_remove {
+            self.remove(&hash);
         }
     }
 
     /// Clear all transactions.
     pub fn clear(&mut self) {
         self.transactions.clear();
+        self.pending_nullifiers.clear();
     }
 
     /// Re-validate all transactions against the current chain state.
     /// Returns the number of transactions removed.
-    pub fn revalidate(&mut self, state: &State) -> usize {
+    pub fn revalidate(&mut self, state: &ShieldedState) -> usize {
         let mut invalid_hashes = Vec::new();
 
-        // Check each transaction against current state
         for (hash, tx) in &self.transactions {
-            if state.validate_transaction(tx).is_err() {
-                invalid_hashes.push(*hash);
+            // Check anchors are still valid
+            for anchor in tx.anchors() {
+                if !state.is_valid_anchor(anchor) {
+                    invalid_hashes.push(*hash);
+                    break;
+                }
+            }
+
+            // Check nullifiers aren't spent
+            for nullifier in tx.nullifiers() {
+                if state.is_nullifier_spent(nullifier) {
+                    invalid_hashes.push(*hash);
+                    break;
+                }
             }
         }
 
-        // Remove invalid transactions
         let removed = invalid_hashes.len();
         for hash in invalid_hashes {
-            self.transactions.remove(&hash);
+            self.remove(&hash);
         }
 
         removed
@@ -95,20 +158,32 @@ impl Mempool {
     pub fn get_hashes(&self) -> Vec<[u8; 32]> {
         self.transactions.keys().cloned().collect()
     }
+
+    /// Get total fees in the mempool.
+    pub fn total_fees(&self) -> u64 {
+        self.transactions.values().map(|tx| tx.fee).sum()
+    }
+
+    /// Get the pending nullifiers set (for conflict checking).
+    pub fn pending_nullifiers(&self) -> &HashSet<Nullifier> {
+        &self.pending_nullifiers
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::KeyPair;
+    use crate::core::BindingSignature;
+
+    fn dummy_tx(fee: u64) -> ShieldedTransaction {
+        ShieldedTransaction::new(vec![], vec![], fee, BindingSignature::new(vec![1; 64]))
+    }
 
     #[test]
     fn test_mempool_add_and_get() {
         let mut mempool = Mempool::new();
 
-        let sender = KeyPair::generate();
-        let receiver = KeyPair::generate();
-        let tx = Transaction::create_signed(&sender, receiver.address(), 100, 1, 0);
+        let tx = dummy_tx(10);
         let hash = tx.hash();
 
         assert!(mempool.add(tx));
@@ -120,10 +195,7 @@ mod tests {
     fn test_mempool_no_duplicates() {
         let mut mempool = Mempool::new();
 
-        let sender = KeyPair::generate();
-        let receiver = KeyPair::generate();
-        let tx = Transaction::create_signed(&sender, receiver.address(), 100, 1, 0);
-
+        let tx = dummy_tx(10);
         assert!(mempool.add(tx.clone()));
         assert!(!mempool.add(tx)); // Should fail, duplicate
         assert_eq!(mempool.len(), 1);
@@ -133,12 +205,9 @@ mod tests {
     fn test_mempool_sorted_by_fee() {
         let mut mempool = Mempool::new();
 
-        let sender = KeyPair::generate();
-        let receiver = KeyPair::generate();
-
-        let tx1 = Transaction::create_signed(&sender, receiver.address(), 100, 1, 0);
-        let tx2 = Transaction::create_signed(&sender, receiver.address(), 100, 5, 1);
-        let tx3 = Transaction::create_signed(&sender, receiver.address(), 100, 3, 2);
+        let tx1 = dummy_tx(1);
+        let tx2 = dummy_tx(5);
+        let tx3 = dummy_tx(3);
 
         mempool.add(tx1);
         mempool.add(tx2);
@@ -148,5 +217,16 @@ mod tests {
         assert_eq!(txs[0].fee, 5);
         assert_eq!(txs[1].fee, 3);
         assert_eq!(txs[2].fee, 1);
+    }
+
+    #[test]
+    fn test_mempool_total_fees() {
+        let mut mempool = Mempool::new();
+
+        mempool.add(dummy_tx(10));
+        mempool.add(dummy_tx(20));
+        mempool.add(dummy_tx(30));
+
+        assert_eq!(mempool.total_fees(), 60);
     }
 }

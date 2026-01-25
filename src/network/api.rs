@@ -1,3 +1,9 @@
+//! REST API for the shielded blockchain node.
+//!
+//! This API is privacy-preserving. Account balances and transaction
+//! amounts are not visible through the API. Only publicly observable
+//! data (block hashes, timestamps, fees) is exposed.
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -9,33 +15,32 @@ use tower_http::services::ServeDir;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
-use crate::core::{Block, Blockchain, ChainInfo, Transaction};
-use crate::crypto::Address;
-use crate::wallet::Wallet;
+use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction};
 use tracing::{info, warn};
 
 use super::Mempool;
 
 /// Shared application state for the API.
 pub struct AppState {
-    pub blockchain: RwLock<Blockchain>,
+    pub blockchain: RwLock<ShieldedBlockchain>,
     pub mempool: RwLock<Mempool>,
     /// List of known peer URLs for gossip
     pub peers: RwLock<Vec<String>>,
 }
 
 /// Create the API router.
+///
+/// Note: This is a privacy-preserving blockchain. Account balances and
+/// transaction amounts are not visible through the API.
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/chain/info", get(chain_info))
         .route("/block/:hash", get(get_block))
         .route("/block/height/:height", get(get_block_by_height))
-        .route("/account/:address", get(get_account))
         .route("/tx", post(submit_transaction))
         .route("/tx/:hash", get(get_transaction))
         .route("/transactions/recent", get(get_recent_transactions))
-        .route("/transactions/:address", get(get_transactions_by_address))
         .route("/mempool", get(get_mempool))
         // Peer sync endpoints
         .route("/blocks", post(receive_block))
@@ -45,11 +50,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/peers", post(add_peer))
         // Transaction relay endpoint (for peer-to-peer relay)
         .route("/tx/relay", post(receive_transaction))
-        // Top holders
-        .route("/accounts/top", get(get_top_holders))
-        // Wallet API
-        .route("/wallet/generate", post(generate_wallet))
-        .route("/wallet/send", post(wallet_send))
         // React app routes - serve index.html for SPA
         .route("/wallet", get(serve_index))
         .route("/wallet/*path", get(serve_index))
@@ -61,7 +61,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 }
 
 async fn index() -> &'static str {
-    "Postera Node API v0.1.0"
+    "Postera Shielded Node API v0.2.0"
 }
 
 async fn chain_info(State(state): State<Arc<AppState>>) -> Json<ChainInfo> {
@@ -78,7 +78,11 @@ struct BlockResponse {
     difficulty: u64,
     nonce: u64,
     tx_count: usize,
+    commitment_root: String,
+    nullifier_root: String,
     transactions: Vec<String>,
+    coinbase_reward: u64,
+    total_fees: u64,
 }
 
 async fn get_block(
@@ -98,16 +102,7 @@ async fn get_block(
         .find(|h| chain.get_block_by_height(*h).map(|b| b.hash()) == Some(hash_bytes))
         .unwrap_or(0);
 
-    Ok(Json(BlockResponse {
-        hash: hex::encode(block.hash()),
-        height,
-        prev_hash: hex::encode(block.header.prev_hash),
-        timestamp: block.header.timestamp,
-        difficulty: block.header.difficulty,
-        nonce: block.header.nonce,
-        tx_count: block.transactions.len(),
-        transactions: block.transactions.iter().map(|tx| tx.hash_hex()).collect(),
-    }))
+    Ok(Json(block_to_response(block, height)))
 }
 
 async fn get_block_by_height(
@@ -119,7 +114,11 @@ async fn get_block_by_height(
         .get_block_by_height(height)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(Json(BlockResponse {
+    Ok(Json(block_to_response(block, height)))
+}
+
+fn block_to_response(block: &ShieldedBlock, height: u64) -> BlockResponse {
+    BlockResponse {
         hash: hex::encode(block.hash()),
         height,
         prev_hash: hex::encode(block.header.prev_hash),
@@ -127,67 +126,21 @@ async fn get_block_by_height(
         difficulty: block.header.difficulty,
         nonce: block.header.nonce,
         tx_count: block.transactions.len(),
-        transactions: block.transactions.iter().map(|tx| tx.hash_hex()).collect(),
-    }))
+        commitment_root: hex::encode(block.header.commitment_root),
+        nullifier_root: hex::encode(block.header.nullifier_root),
+        transactions: block.transactions.iter().map(|tx| hex::encode(tx.hash())).collect(),
+        coinbase_reward: block.coinbase.reward,
+        total_fees: block.total_fees(),
+    }
 }
 
-#[derive(Serialize)]
-struct AccountResponse {
-    address: String,
-    balance: u64,
-    nonce: u64,
-}
-
-async fn get_account(
-    State(state): State<Arc<AppState>>,
-    Path(address): Path<String>,
-) -> Result<Json<AccountResponse>, StatusCode> {
-    let addr = Address::from_hex(&address).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    let chain = state.blockchain.read().unwrap();
-    let account = chain.state().get_account(&addr);
-
-    Ok(Json(AccountResponse {
-        address: addr.to_hex(),
-        balance: account.balance,
-        nonce: account.nonce,
-    }))
-}
-
-#[derive(Serialize)]
-struct TopHolderResponse {
-    address: String,
-    balance: u64,
-    nonce: u64,
-}
-
-async fn get_top_holders(
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<TopHolderResponse>> {
-    let chain = state.blockchain.read().unwrap();
-    let holders: Vec<TopHolderResponse> = chain
-        .state()
-        .top_holders(10)
-        .into_iter()
-        .map(|acc| TopHolderResponse {
-            address: acc.address.to_hex(),
-            balance: acc.balance,
-            nonce: acc.nonce,
-        })
-        .collect();
-
-    Json(holders)
-}
-
+/// Shielded transaction response - only public data is exposed.
 #[derive(Serialize)]
 struct TransactionResponse {
     hash: String,
-    from: String,
-    to: String,
-    amount: u64,
     fee: u64,
-    nonce: u64,
-    is_coinbase: bool,
+    spend_count: usize,
+    output_count: usize,
     status: String,
     block_height: Option<u64>,
 }
@@ -206,13 +159,10 @@ async fn get_transaction(
         let mempool = state.mempool.read().unwrap();
         if let Some(tx) = mempool.get(&hash_bytes) {
             return Ok(Json(TransactionResponse {
-                hash: tx.hash_hex(),
-                from: tx.from.to_hex(),
-                to: tx.to.to_hex(),
-                amount: tx.amount,
+                hash: hex::encode(tx.hash()),
                 fee: tx.fee,
-                nonce: tx.nonce,
-                is_coinbase: tx.is_coinbase(),
+                spend_count: tx.spends.len(),
+                output_count: tx.outputs.len(),
                 status: "pending".to_string(),
                 block_height: None,
             }));
@@ -226,13 +176,10 @@ async fn get_transaction(
             for tx in &block.transactions {
                 if tx.hash() == hash_bytes {
                     return Ok(Json(TransactionResponse {
-                        hash: tx.hash_hex(),
-                        from: tx.from.to_hex(),
-                        to: tx.to.to_hex(),
-                        amount: tx.amount,
+                        hash: hex::encode(tx.hash()),
                         fee: tx.fee,
-                        nonce: tx.nonce,
-                        is_coinbase: tx.is_coinbase(),
+                        spend_count: tx.spends.len(),
+                        output_count: tx.outputs.len(),
                         status: "confirmed".to_string(),
                         block_height: Some(h),
                     }));
@@ -254,13 +201,10 @@ async fn get_recent_transactions(
         let mempool = state.mempool.read().unwrap();
         for tx in mempool.get_transactions(10) {
             transactions.push(TransactionResponse {
-                hash: tx.hash_hex(),
-                from: tx.from.to_hex(),
-                to: tx.to.to_hex(),
-                amount: tx.amount,
+                hash: hex::encode(tx.hash()),
                 fee: tx.fee,
-                nonce: tx.nonce,
-                is_coinbase: tx.is_coinbase(),
+                spend_count: tx.spends.len(),
+                output_count: tx.outputs.len(),
                 status: "pending".to_string(),
                 block_height: None,
             });
@@ -275,13 +219,10 @@ async fn get_recent_transactions(
         if let Some(block) = chain.get_block_by_height(h) {
             for tx in &block.transactions {
                 transactions.push(TransactionResponse {
-                    hash: tx.hash_hex(),
-                    from: tx.from.to_hex(),
-                    to: tx.to.to_hex(),
-                    amount: tx.amount,
+                    hash: hex::encode(tx.hash()),
                     fee: tx.fee,
-                    nonce: tx.nonce,
-                    is_coinbase: tx.is_coinbase(),
+                    spend_count: tx.spends.len(),
+                    output_count: tx.outputs.len(),
                     status: "confirmed".to_string(),
                     block_height: Some(h),
                 });
@@ -296,72 +237,9 @@ async fn get_recent_transactions(
     Json(transactions)
 }
 
-async fn get_transactions_by_address(
-    State(state): State<Arc<AppState>>,
-    Path(address): Path<String>,
-) -> Json<Vec<TransactionResponse>> {
-    let mut transactions = Vec::new();
-
-    // Parse the address
-    let target_address = address.to_lowercase();
-
-    // Get pending transactions from mempool
-    {
-        let mempool = state.mempool.read().unwrap();
-        for tx in mempool.get_transactions(100) {
-            let from = tx.from.to_hex();
-            let to = tx.to.to_hex();
-            if from == target_address || to == target_address {
-                transactions.push(TransactionResponse {
-                    hash: tx.hash_hex(),
-                    from,
-                    to,
-                    amount: tx.amount,
-                    fee: tx.fee,
-                    nonce: tx.nonce,
-                    is_coinbase: tx.is_coinbase(),
-                    status: "pending".to_string(),
-                    block_height: None,
-                });
-            }
-        }
-    }
-
-    // Get confirmed transactions from blockchain
-    let chain = state.blockchain.read().unwrap();
-
-    for h in (0..=chain.height()).rev() {
-        if let Some(block) = chain.get_block_by_height(h) {
-            for tx in &block.transactions {
-                let from = tx.from.to_hex();
-                let to = tx.to.to_hex();
-                if from == target_address || to == target_address {
-                    transactions.push(TransactionResponse {
-                        hash: tx.hash_hex(),
-                        from,
-                        to,
-                        amount: tx.amount,
-                        fee: tx.fee,
-                        nonce: tx.nonce,
-                        is_coinbase: tx.is_coinbase(),
-                        status: "confirmed".to_string(),
-                        block_height: Some(h),
-                    });
-                }
-            }
-        }
-
-        if transactions.len() >= 50 {
-            break;
-        }
-    }
-
-    Json(transactions)
-}
-
 #[derive(Deserialize)]
 struct SubmitTxRequest {
-    transaction: Transaction,
+    transaction: ShieldedTransaction,
 }
 
 #[derive(Serialize)]
@@ -375,14 +253,16 @@ async fn submit_transaction(
     Json(req): Json<SubmitTxRequest>,
 ) -> Result<Json<SubmitTxResponse>, (StatusCode, String)> {
     let tx = req.transaction;
-    let hash = tx.hash_hex();
+    let hash = hex::encode(tx.hash());
 
     // Validate transaction
     {
         let chain = state.blockchain.read().unwrap();
+        let params = chain.verifying_params()
+            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Verifying params not configured".to_string()))?;
         chain
             .state()
-            .validate_transaction(&tx)
+            .validate_transaction(&tx, params)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     }
 
@@ -395,7 +275,7 @@ async fn submit_transaction(
     if !added {
         return Err((
             StatusCode::CONFLICT,
-            "Transaction already in mempool".to_string(),
+            "Transaction already in mempool or conflicts with pending".to_string(),
         ));
     }
 
@@ -418,6 +298,7 @@ async fn submit_transaction(
 struct MempoolResponse {
     count: usize,
     transactions: Vec<String>,
+    total_fees: u64,
 }
 
 async fn get_mempool(State(state): State<Arc<AppState>>) -> Json<MempoolResponse> {
@@ -426,7 +307,8 @@ async fn get_mempool(State(state): State<Arc<AppState>>) -> Json<MempoolResponse
 
     Json(MempoolResponse {
         count: mempool.len(),
-        transactions: txs.iter().map(|tx| tx.hash_hex()).collect(),
+        transactions: txs.iter().map(|tx| hex::encode(tx.hash())).collect(),
+        total_fees: mempool.total_fees(),
     })
 }
 
@@ -435,29 +317,32 @@ async fn get_mempool(State(state): State<Arc<AppState>>) -> Json<MempoolResponse
 /// Receive a block from a peer node.
 async fn receive_block(
     State(state): State<Arc<AppState>>,
-    Json(block): Json<Block>,
+    Json(block): Json<ShieldedBlock>,
 ) -> Result<Json<ReceiveBlockResponse>, (StatusCode, String)> {
     let block_hash = block.hash_hex();
 
     info!("Received block {} from peer", &block_hash[..16]);
 
-    // Try to add the block (handles orphans and forks)
+    // Try to add the block
     let (accepted, status) = {
         let mut chain = state.blockchain.write().unwrap();
-        match chain.try_add_block(block.clone()) {
-            Ok(true) => {
+        match chain.add_block(block.clone()) {
+            Ok(()) => {
                 info!("Added block {} to chain (height: {})", &block_hash[..16], chain.height());
 
                 // Remove confirmed transactions from mempool
                 let tx_hashes: Vec<[u8; 32]> = block
                     .transactions
                     .iter()
-                    .skip(1) // Skip coinbase
                     .map(|tx| tx.hash())
                     .collect();
 
                 let mut mempool = state.mempool.write().unwrap();
                 mempool.remove_confirmed(&tx_hashes);
+
+                // Remove transactions with now-spent nullifiers
+                let nullifiers: Vec<_> = block.nullifiers();
+                mempool.remove_spent_nullifiers(&nullifiers);
 
                 // Re-validate remaining mempool transactions
                 let removed = mempool.revalidate(chain.state());
@@ -467,16 +352,6 @@ async fn receive_block(
 
                 (true, "accepted")
             }
-            Ok(false) => {
-                // Block stored as orphan or already known
-                let orphans = chain.orphan_count();
-                if orphans > 0 {
-                    info!("Block {} stored as orphan (total orphans: {})", &block_hash[..16], orphans);
-                    (false, "orphan")
-                } else {
-                    (false, "duplicate")
-                }
-            }
             Err(e) => {
                 warn!("Block {} rejected: {}", &block_hash[..16], e);
                 return Err((StatusCode::BAD_REQUEST, format!("Block rejected: {}", e)));
@@ -484,7 +359,7 @@ async fn receive_block(
         }
     };
 
-    // Relay to other peers (gossip protocol) if accepted to main chain
+    // Relay to other peers (gossip protocol) if accepted
     if accepted {
         let peers = state.peers.read().unwrap().clone();
         if !peers.is_empty() {
@@ -511,7 +386,7 @@ struct ReceiveBlockResponse {
 async fn get_blocks_since(
     State(state): State<Arc<AppState>>,
     Path(since_height): Path<u64>,
-) -> Json<Vec<Block>> {
+) -> Json<Vec<ShieldedBlock>> {
     let chain = state.blockchain.read().unwrap();
     let current_height = chain.height();
 
@@ -579,9 +454,9 @@ async fn add_peer(
 /// Receive a transaction from a peer (relay endpoint).
 async fn receive_transaction(
     State(state): State<Arc<AppState>>,
-    Json(tx): Json<Transaction>,
+    Json(tx): Json<ShieldedTransaction>,
 ) -> Result<Json<SubmitTxResponse>, (StatusCode, String)> {
-    let hash = tx.hash_hex();
+    let hash = hex::encode(tx.hash());
 
     // Check if already in mempool
     {
@@ -597,9 +472,11 @@ async fn receive_transaction(
     // Validate transaction
     {
         let chain = state.blockchain.read().unwrap();
+        let params = chain.verifying_params()
+            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Verifying params not configured".to_string()))?;
         chain
             .state()
-            .validate_transaction(&tx)
+            .validate_transaction(&tx, params)
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     }
 
@@ -631,7 +508,7 @@ async fn receive_transaction(
 // ============ Relay Helper Functions ============
 
 /// Relay a block to all known peers.
-async fn relay_block(block: &Block, peers: &[String]) {
+async fn relay_block(block: &ShieldedBlock, peers: &[String]) {
     let client = reqwest::Client::new();
     let block_hash = &block.hash_hex()[..16];
 
@@ -656,9 +533,9 @@ async fn relay_block(block: &Block, peers: &[String]) {
 }
 
 /// Relay a transaction to all known peers.
-async fn relay_transaction(tx: &Transaction, peers: &[String]) {
+async fn relay_transaction(tx: &ShieldedTransaction, peers: &[String]) {
     let client = reqwest::Client::new();
-    let tx_hash = &tx.hash_hex()[..16];
+    let tx_hash = &hex::encode(tx.hash())[..16];
 
     for peer in peers {
         let url = format!("{}/tx/relay", peer);
@@ -674,115 +551,6 @@ async fn relay_transaction(tx: &Transaction, peers: &[String]) {
             }
         }
     }
-}
-
-// ============ Wallet API ============
-
-#[derive(Serialize)]
-struct WalletResponse {
-    address: String,
-    public_key: String,
-    secret_key: String,
-}
-
-/// Generate a new wallet.
-async fn generate_wallet() -> Json<WalletResponse> {
-    let wallet = Wallet::generate();
-
-    Json(WalletResponse {
-        address: wallet.address().to_hex(),
-        public_key: hex::encode(wallet.public_key_bytes()),
-        secret_key: hex::encode(wallet.secret_key_bytes()),
-    })
-}
-
-#[derive(Deserialize)]
-struct WalletSendRequest {
-    public_key: String,
-    secret_key: String,
-    to: String,
-    amount: u64,
-    fee: u64,
-}
-
-#[derive(Serialize)]
-struct WalletSendResponse {
-    hash: String,
-    status: String,
-    from: String,
-    to: String,
-    amount: u64,
-    fee: u64,
-}
-
-/// Sign and send a transaction using wallet keys.
-///
-/// WARNING: This endpoint receives secret keys over the network.
-/// In production, use client-side signing with WASM-compiled Dilithium.
-async fn wallet_send(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<WalletSendRequest>,
-) -> Result<Json<WalletSendResponse>, (StatusCode, String)> {
-    // Decode keys
-    let pk_bytes = hex::decode(&req.public_key)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid public key hex".to_string()))?;
-    let sk_bytes = hex::decode(&req.secret_key)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid secret key hex".to_string()))?;
-
-    // Reconstruct wallet from keys
-    let wallet = Wallet::from_keys(&pk_bytes, &sk_bytes)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid keys: {}", e)))?;
-
-    // Parse recipient address
-    let to_addr = Address::from_hex(&req.to)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid recipient address".to_string()))?;
-
-    // Get current nonce
-    let nonce = {
-        let chain = state.blockchain.read().unwrap();
-        chain.nonce(&wallet.address())
-    };
-
-    // Create and sign transaction
-    let tx = wallet.create_transaction(to_addr, req.amount, req.fee, nonce);
-    let tx_hash = tx.hash_hex();
-    let from_addr = wallet.address().to_hex();
-
-    // Validate transaction
-    {
-        let chain = state.blockchain.read().unwrap();
-        chain
-            .state()
-            .validate_transaction(&tx)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid transaction: {}", e)))?;
-    }
-
-    // Add to mempool
-    {
-        let mut mempool = state.mempool.write().unwrap();
-        if !mempool.add(tx.clone()) {
-            return Err((StatusCode::CONFLICT, "Transaction already in mempool".to_string()));
-        }
-    }
-
-    // Relay to peers
-    let peers = state.peers.read().unwrap().clone();
-    if !peers.is_empty() {
-        tokio::spawn(async move {
-            relay_transaction(&tx, &peers).await;
-        });
-    }
-
-    info!("Wallet {} sent {} to {}", &from_addr[..12], req.amount, &req.to[..12]);
-
-    Ok(Json(WalletSendResponse {
-        hash: tx_hash,
-        status: "pending".to_string(),
-        from: from_addr,
-        to: req.to,
-        amount: req.amount,
-        fee: req.fee,
-    }))
 }
 
 // ============ React App ============
