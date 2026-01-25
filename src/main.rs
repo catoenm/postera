@@ -318,9 +318,8 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine: Option<St
         peers: RwLock::new(peers.clone()),
     });
 
-    // Create router with API and explorer
-    let app = create_router(state.clone())
-        .nest("/explorer", postera::explorer::create_explorer_router());
+    // Create router with API (wallet and explorer are served from static React app)
+    let app = create_router(state.clone());
 
     // Build our own URL for peer announcements
     let our_url = format!("http://localhost:{}", port);

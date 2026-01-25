@@ -2,9 +2,15 @@
 wallet.json
 *.wallet
 wallets/
+my-wallet
 
 # Build artifacts
 target/
+static/
+
+# React wallet
+wallet/node_modules/
+wallet/dist/
 
 # Blockchain data
 data/

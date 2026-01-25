@@ -1,10 +1,10 @@
-use pqcrypto_dilithium::dilithium3;
-use pqcrypto_traits::sign::{DetachedSignature, PublicKey};
+use fips204::ml_dsa_65;
+use fips204::traits::{SerDes, Signer, Verifier};
 use serde::{Deserialize, Serialize};
 
-use super::keys::KeyPair;
+use super::keys::{KeyPair, SIGNATURE_SIZE, PUBLIC_KEY_SIZE};
 
-/// A Dilithium signature wrapper with serialization support.
+/// A ML-DSA-65 signature wrapper with serialization support.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Signature(Vec<u8>);
 
@@ -58,27 +58,34 @@ impl std::fmt::Debug for Signature {
 
 /// Sign a message using a keypair.
 ///
-/// Uses Dilithium3 detached signatures for signing arbitrary data.
-/// The signature is approximately 3293 bytes.
+/// Uses ML-DSA-65 (FIPS 204) detached signatures for signing arbitrary data.
+/// The signature is 3309 bytes.
 pub fn sign(message: &[u8], keypair: &KeyPair) -> Signature {
-    let sig = dilithium3::detached_sign(message, keypair.secret_key());
-    Signature(sig.as_bytes().to_vec())
+    // Empty context for basic signing (as per FIPS 204)
+    let context: &[u8] = &[];
+    let sig: [u8; SIGNATURE_SIZE] = keypair.secret_key().try_sign(message, context).expect("signing failed");
+    Signature(sig.to_vec())
 }
 
 /// Verify a signature against a message and public key.
 ///
 /// Returns true if the signature is valid, false otherwise.
 pub fn verify(message: &[u8], signature: &Signature, public_key: &[u8]) -> Result<bool, SignatureError> {
-    let pk = dilithium3::PublicKey::from_bytes(public_key)
+    let pk_array: [u8; PUBLIC_KEY_SIZE] = public_key
+        .try_into()
         .map_err(|_| SignatureError::InvalidPublicKey)?;
 
-    let sig = dilithium3::DetachedSignature::from_bytes(&signature.0)
+    let pk = ml_dsa_65::PublicKey::try_from_bytes(pk_array)
+        .map_err(|_| SignatureError::InvalidPublicKey)?;
+
+    let sig_array: [u8; SIGNATURE_SIZE] = signature.0
+        .as_slice()
+        .try_into()
         .map_err(|_| SignatureError::InvalidSignature)?;
 
-    match dilithium3::verify_detached_signature(&sig, message, &pk) {
-        Ok(()) => Ok(true),
-        Err(_) => Ok(false),
-    }
+    // Empty context for basic verification (as per FIPS 204)
+    let context: &[u8] = &[];
+    Ok(pk.verify(message, &sig_array, context))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,7 +110,7 @@ mod tests {
         let signature = sign(message, &keypair);
 
         // Should verify with correct key
-        let valid = verify(message, &signature, keypair.public_key_bytes()).unwrap();
+        let valid = verify(message, &signature, &keypair.public_key_bytes()).unwrap();
         assert!(valid);
     }
 
@@ -114,8 +121,8 @@ mod tests {
 
         let signature = sign(message, &keypair);
 
-        // Dilithium3 signature size is 3309 bytes
-        assert_eq!(signature.as_bytes().len(), 3309);
+        // ML-DSA-65 signature size is 3309 bytes
+        assert_eq!(signature.as_bytes().len(), SIGNATURE_SIZE);
     }
 
     #[test]
@@ -126,7 +133,7 @@ mod tests {
 
         let signature = sign(message, &keypair);
 
-        let valid = verify(wrong_message, &signature, keypair.public_key_bytes()).unwrap();
+        let valid = verify(wrong_message, &signature, &keypair.public_key_bytes()).unwrap();
         assert!(!valid);
     }
 
@@ -139,7 +146,7 @@ mod tests {
         let signature = sign(message, &keypair1);
 
         // Verify with wrong public key should fail
-        let valid = verify(message, &signature, keypair2.public_key_bytes()).unwrap();
+        let valid = verify(message, &signature, &keypair2.public_key_bytes()).unwrap();
         assert!(!valid);
     }
 

@@ -6,9 +6,8 @@ description = "A cryptocurrency using post-quantum cryptography"
 license = "MIT"
 
 [dependencies]
-# Post-quantum cryptography
-pqcrypto-dilithium = "0.5"
-pqcrypto-traits = "0.3"
+# Post-quantum cryptography (NIST FIPS 204 ML-DSA-65)
+fips204 = "0.4"
 
 # Hashing
 sha2 = "0.10"

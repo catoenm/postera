@@ -19,7 +19,16 @@
       "Bash(fly volumes create:*)",
       "Bash(fly deploy:*)",
       "Bash(rustc:*)",
-      "Bash(fly secrets set:*)"
+      "Bash(fly secrets set:*)",
+      "Bash(npm view:*)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(./target/release/postera:*)",
+      "Bash(npm show:*)",
+      "Bash(npm create:*)",
+      "Bash(npm install)",
+      "Bash(npm install:*)",
+      "Bash(npm run build:*)",
+      "Bash(ls:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

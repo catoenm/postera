@@ -59,13 +59,13 @@ impl Wallet {
     }
 
     /// Get public key bytes.
-    pub fn public_key_bytes(&self) -> &[u8] {
-        self.keypair.public_key_bytes()
+    pub fn public_key_bytes(&self) -> Vec<u8> {
+        self.keypair.public_key_bytes().to_vec()
     }
 
     /// Get secret key bytes.
-    pub fn secret_key_bytes(&self) -> &[u8] {
-        self.keypair.secret_key_bytes()
+    pub fn secret_key_bytes(&self) -> Vec<u8> {
+        self.keypair.secret_key_bytes().to_vec()
     }
 
     /// Create wallet from public and secret key bytes.

@@ -1,23 +1,23 @@
-use pqcrypto_dilithium::dilithium3;
-use pqcrypto_traits::sign::{PublicKey, SecretKey};
+use fips204::ml_dsa_65;
+use fips204::traits::SerDes;
 
 use super::Address;
 
-/// A quantum-resistant keypair using CRYSTALS-Dilithium3.
+/// A quantum-resistant keypair using ML-DSA-65 (FIPS 204).
 ///
-/// Dilithium is a lattice-based signature scheme selected by NIST
-/// for post-quantum cryptography standardization. It provides
-/// security against both classical and quantum computer attacks.
+/// ML-DSA (formerly CRYSTALS-Dilithium) is a lattice-based signature scheme
+/// standardized by NIST in FIPS 204. It provides security against both
+/// classical and quantum computer attacks.
 #[derive(Clone)]
 pub struct KeyPair {
-    public_key: dilithium3::PublicKey,
-    secret_key: dilithium3::SecretKey,
+    public_key: ml_dsa_65::PublicKey,
+    secret_key: ml_dsa_65::PrivateKey,
 }
 
 impl KeyPair {
     /// Generate a new random keypair.
     pub fn generate() -> Self {
-        let (public_key, secret_key) = dilithium3::keypair();
+        let (public_key, secret_key) = ml_dsa_65::try_keygen().expect("RNG failure");
         Self {
             public_key,
             secret_key,
@@ -26,10 +26,18 @@ impl KeyPair {
 
     /// Reconstruct a keypair from raw bytes.
     pub fn from_bytes(public_key: &[u8], secret_key: &[u8]) -> Result<Self, KeyError> {
-        let public_key = dilithium3::PublicKey::from_bytes(public_key)
+        let pk_array: [u8; PUBLIC_KEY_SIZE] = public_key
+            .try_into()
             .map_err(|_| KeyError::InvalidPublicKey)?;
-        let secret_key = dilithium3::SecretKey::from_bytes(secret_key)
+        let sk_array: [u8; SECRET_KEY_SIZE] = secret_key
+            .try_into()
             .map_err(|_| KeyError::InvalidSecretKey)?;
+
+        let public_key = ml_dsa_65::PublicKey::try_from_bytes(pk_array)
+            .map_err(|_| KeyError::InvalidPublicKey)?;
+        let secret_key = ml_dsa_65::PrivateKey::try_from_bytes(sk_array)
+            .map_err(|_| KeyError::InvalidSecretKey)?;
+
         Ok(Self {
             public_key,
             secret_key,
@@ -37,28 +45,28 @@ impl KeyPair {
     }
 
     /// Get the public key bytes.
-    pub fn public_key_bytes(&self) -> &[u8] {
-        self.public_key.as_bytes()
+    pub fn public_key_bytes(&self) -> [u8; PUBLIC_KEY_SIZE] {
+        self.public_key.clone().into_bytes()
     }
 
     /// Get the secret key bytes.
-    pub fn secret_key_bytes(&self) -> &[u8] {
-        self.secret_key.as_bytes()
+    pub fn secret_key_bytes(&self) -> [u8; SECRET_KEY_SIZE] {
+        self.secret_key.clone().into_bytes()
     }
 
     /// Get a reference to the internal public key.
-    pub fn public_key(&self) -> &dilithium3::PublicKey {
+    pub fn public_key(&self) -> &ml_dsa_65::PublicKey {
         &self.public_key
     }
 
     /// Get a reference to the internal secret key.
-    pub fn secret_key(&self) -> &dilithium3::SecretKey {
+    pub fn secret_key(&self) -> &ml_dsa_65::PrivateKey {
         &self.secret_key
     }
 
     /// Derive the address from this keypair's public key.
     pub fn address(&self) -> Address {
-        Address::from_public_key(self.public_key_bytes())
+        Address::from_public_key(&self.public_key_bytes())
     }
 }
 
@@ -70,15 +78,12 @@ pub enum KeyError {
     InvalidSecretKey,
 }
 
-/// Dilithium3 key sizes for reference:
+/// ML-DSA-65 key sizes (FIPS 204):
 /// - Public key: 1952 bytes
 /// - Secret key: 4032 bytes
 /// - Signature: 3309 bytes
-#[allow(dead_code)]
 pub const PUBLIC_KEY_SIZE: usize = 1952;
-#[allow(dead_code)]
 pub const SECRET_KEY_SIZE: usize = 4032;
-#[allow(dead_code)]
 pub const SIGNATURE_SIZE: usize = 3309;
 
 #[cfg(test)]
@@ -96,8 +101,8 @@ mod tests {
     #[test]
     fn test_keypair_roundtrip() {
         let keypair = KeyPair::generate();
-        let pk_bytes = keypair.public_key_bytes().to_vec();
-        let sk_bytes = keypair.secret_key_bytes().to_vec();
+        let pk_bytes = keypair.public_key_bytes();
+        let sk_bytes = keypair.secret_key_bytes();
 
         let restored = KeyPair::from_bytes(&pk_bytes, &sk_bytes).unwrap();
 
