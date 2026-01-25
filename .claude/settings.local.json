@@ -28,7 +28,13 @@
       "Bash(npm install)",
       "Bash(npm install:*)",
       "Bash(npm run build:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(fly logs:*)",
+      "Bash(fly apps restart:*)",
+      "Bash(lsof:*)",
+      "Bash(kill:*)",
+      "Bash(xargs ls:*)",
+      "Bash(~/.fly/bin/fly deploy:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

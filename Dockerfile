@@ -31,6 +31,9 @@ WORKDIR /app
 # Copy the binary from builder
 COPY --from=builder /app/target/release/postera /app/postera
 
+# Copy static files (pre-built React app)
+COPY static ./static
+
 # Create data directory
 RUN mkdir -p /app/data
 

@@ -367,3 +367,21 @@ label {
   padding: 48px;
   color: var(--text-secondary);
 }
+
+.info-text {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+
+.sign-result {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border-color);
+}
+
+.sign-result textarea {
+  background: var(--bg-primary);
+  font-size: 0.75rem;
+}

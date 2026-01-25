@@ -26,7 +26,11 @@ export default function Wallet() {
   const [account, setAccount] = useState<Account | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'wallet' | 'send' | 'receive' | 'history'>('wallet');
+  const [view, setView] = useState<'wallet' | 'send' | 'receive' | 'history' | 'sign'>('wallet');
+
+  // Sign message state
+  const [messageToSign, setMessageToSign] = useState('');
+  const [signedResult, setSignedResult] = useState<{ message: string; signature: string } | null>(null);
 
   // Send form state
   const [sendTo, setSendTo] = useState('');
@@ -230,6 +234,29 @@ export default function Wallet() {
     }
   };
 
+  // Sign arbitrary message
+  const handleSignMessage = () => {
+    if (!wallet) return;
+    if (!messageToSign.trim()) {
+      alert('Please enter a message to sign');
+      return;
+    }
+
+    try {
+      const messageBytes = new TextEncoder().encode(messageToSign);
+      const secretKeyBytes = hexToBytes(wallet.secret_key);
+      const signatureBytes = sign(messageBytes, secretKeyBytes);
+      const signature = bytesToHex(signatureBytes);
+
+      setSignedResult({
+        message: messageToSign,
+        signature,
+      });
+    } catch (e) {
+      alert('Failed to sign message: ' + (e as Error).message);
+    }
+  };
+
   // Loading state
   if (loading) {
     return (
@@ -308,6 +335,9 @@ export default function Wallet() {
         </a>
         <a className={view === 'history' ? 'active' : ''} onClick={() => setView('history')}>
           History
+        </a>
+        <a className={view === 'sign' ? 'active' : ''} onClick={() => setView('sign')}>
+          Sign
         </a>
       </nav>
 
@@ -445,6 +475,56 @@ export default function Wallet() {
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+      )}
+
+      {view === 'sign' && (
+        <div className="card">
+          <h2>Sign Message</h2>
+          <p className="info-text">
+            Sign any message with your private key. This proves you control this wallet
+            without revealing your secret key. The signature is created entirely in your browser.
+          </p>
+          <div className="form-group">
+            <label>Message to Sign</label>
+            <textarea
+              value={messageToSign}
+              onChange={(e) => setMessageToSign(e.target.value)}
+              placeholder="Enter any text to sign..."
+              rows={4}
+            />
+          </div>
+          <button onClick={handleSignMessage}>
+            Sign Message
+          </button>
+
+          {signedResult && (
+            <div className="sign-result">
+              <div className="form-group">
+                <label>Original Message</label>
+                <textarea readOnly value={signedResult.message} rows={2} />
+              </div>
+              <div className="form-group">
+                <label>Signature (ML-DSA-65, {signedResult.signature.length / 2} bytes)</label>
+                <textarea readOnly value={signedResult.signature} rows={6} />
+              </div>
+              <div className="form-group">
+                <label>Your Public Key (for verification)</label>
+                <textarea readOnly value={wallet.public_key} rows={4} />
+              </div>
+              <button
+                className="secondary"
+                onClick={() => navigator.clipboard.writeText(JSON.stringify({
+                  message: signedResult.message,
+                  signature: signedResult.signature,
+                  public_key: wallet.public_key,
+                  address: wallet.address,
+                }, null, 2))}
+              >
+                Copy All (JSON)
+              </button>
+            </div>
           )}
         </div>
       )}
