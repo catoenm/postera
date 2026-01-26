@@ -45,7 +45,11 @@
       "Bash(~/.fly/bin/flyctl ssh console -C \"rm -rf /app/data/*\")",
       "Bash(~/.fly/bin/flyctl logs:*)",
       "Bash(find:*)",
-      "Bash(cargo search:*)"
+      "Bash(cargo search:*)",
+      "Bash(git rm:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nRemove wallet files from git tracking\n\nRemove my-wallet.json and shielded-wallet.json from version control\nand add them to .gitignore to prevent accidental commits.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit --no-gpg-sign -m \"$\\(cat <<''EOF''\nRemove wallet files from git tracking\n\nRemove my-wallet.json and shielded-wallet.json from version control\nand add them to .gitignore to prevent accidental commits.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
     ]
   },
   "enableAllProjectMcpServers": true,
