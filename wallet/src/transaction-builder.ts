@@ -16,21 +16,35 @@ import { getWitnessByPosition } from './api';
 import type { WalletNote, WitnessResponse } from './types';
 
 /**
- * Spend description for a shielded transaction.
- * Fields match the Rust struct serialization format.
+ * Rust serialization format reference:
+ *
+ * SpendDescription:
+ *   - anchor: hex string (hex_bytes_32)
+ *   - nullifier: byte array [u8; 32] (default serde for Nullifier)
+ *   - value_commitment: hex string (hex_bytes_32)
+ *   - proof: byte array (ZkProof uses serialize_bytes)
+ *   - signature: hex string (Signature uses serialize_str with hex)
+ *   - public_key: hex string (hex_bytes)
+ *
+ * OutputDescription:
+ *   - note_commitment: byte array [u8; 32] (default serde for NoteCommitment)
+ *   - value_commitment: hex string (hex_bytes_32)
+ *   - encrypted_note: { ciphertext: byte array, ephemeral_pk: byte array }
+ *   - proof: byte array (ZkProof)
+ *
+ * BindingSignature:
+ *   - signature: hex string (hex_bytes)
  */
+
 export interface SpendDescription {
-  anchor: string;           // hex string (uses hex_bytes_32 serde)
-  nullifier: number[];      // byte array [u8; 32] (default serde)
-  value_commitment: string; // hex string (uses hex_bytes_32 serde)
-  proof: number[];          // byte array (default serde for ZkProof)
+  anchor: string;           // hex string
+  nullifier: number[];      // byte array [u8; 32]
+  value_commitment: string; // hex string
+  proof: number[];          // byte array
   signature: string;        // hex string
   public_key: string;       // hex string
 }
 
-/**
- * Output description for a shielded transaction.
- */
 export interface OutputDescription {
   note_commitment: number[]; // byte array [u8; 32]
   value_commitment: string;  // hex string
@@ -41,76 +55,47 @@ export interface OutputDescription {
   proof: number[];           // byte array
 }
 
-/**
- * A complete shielded transaction.
- */
 export interface ShieldedTransaction {
   spends: SpendDescription[];
   outputs: OutputDescription[];
   fee: number;
   binding_sig: {
-    signature: number[];     // byte array
+    signature: string;       // hex string
   };
 }
 
-/**
- * Parameters for creating a transaction.
- */
 export interface TransactionParams {
-  /** Notes to spend */
   spendNotes: WalletNote[];
-  /** Recipient outputs: { pkHash, amount } */
   recipients: { pkHash: string; amount: bigint }[];
-  /** Transaction fee in smallest units */
   fee: bigint;
-  /** Sender's secret key (for signing) */
   secretKey: Uint8Array;
-  /** Sender's public key */
   publicKey: Uint8Array;
-  /** Sender's pk_hash (for change) */
   senderPkHash: Uint8Array;
 }
 
-/**
- * Create a placeholder ZK proof (192 zero bytes).
- */
 function createPlaceholderProof(): number[] {
   return Array.from(new Uint8Array(192));
 }
 
-/**
- * Create a placeholder binding signature (64 zero bytes).
- */
-function createPlaceholderBindingSignature(): number[] {
-  return Array.from(new Uint8Array(64));
+function createPlaceholderBindingSignature(): string {
+  return bytesToHex(new Uint8Array(64));
 }
 
-/**
- * Create a random value commitment (32 bytes) as hex string.
- * In a real implementation, this would be a Pedersen commitment.
- */
 function createPlaceholderValueCommitment(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   return bytesToHex(bytes);
 }
 
-/**
- * Convert Uint8Array to number array for JSON serialization.
- */
 function toByteArray(bytes: Uint8Array): number[] {
   return Array.from(bytes);
 }
 
-/**
- * Build a shielded transaction.
- */
 export async function createShieldedTransaction(
   params: TransactionParams
 ): Promise<ShieldedTransaction> {
   const { spendNotes, recipients, fee, secretKey, publicKey, senderPkHash } = params;
 
-  // Calculate totals
   const totalSpend = spendNotes.reduce((sum, n) => sum + n.value, 0n);
   const totalOutput = recipients.reduce((sum, r) => sum + r.amount, 0n);
   const change = totalSpend - totalOutput - fee;
@@ -121,24 +106,20 @@ export async function createShieldedTransaction(
     );
   }
 
-  // Create spends
   const spends: SpendDescription[] = [];
   for (const note of spendNotes) {
     const spend = await createSpendDescription(note, secretKey, publicKey);
     spends.push(spend);
   }
 
-  // Create outputs
   const outputs: OutputDescription[] = [];
   const viewingKey = deriveViewingKey(secretKey);
 
-  // Recipient outputs
   for (const recipient of recipients) {
     const output = createOutputDescription(recipient.pkHash, recipient.amount, viewingKey);
     outputs.push(output);
   }
 
-  // Change output (if any)
   if (change > 0n) {
     const changeOutput = createOutputDescription(
       bytesToHex(senderPkHash),
@@ -158,15 +139,11 @@ export async function createShieldedTransaction(
   };
 }
 
-/**
- * Create a spend description for a note.
- */
 async function createSpendDescription(
   note: WalletNote,
   secretKey: Uint8Array,
   publicKey: Uint8Array
 ): Promise<SpendDescription> {
-  // Get witness (Merkle path) for the note by position
   let witness: WitnessResponse;
   try {
     witness = await getWitnessByPosition(note.position);
@@ -179,14 +156,12 @@ async function createSpendDescription(
   const nullifierBytes = hexToBytes(nullifierHex);
   const valueCommitment = createPlaceholderValueCommitment();
 
-  // Create signing message: anchor || nullifier || value_commitment
   const message = new Uint8Array([
     ...hexToBytes(anchor),
     ...nullifierBytes,
     ...hexToBytes(valueCommitment),
   ]);
 
-  // Sign with ML-DSA-65
   const signature = sign(message, secretKey);
 
   return {
@@ -199,9 +174,6 @@ async function createSpendDescription(
   };
 }
 
-/**
- * Create an output description.
- */
 function createOutputDescription(
   recipientPkHashHex: string,
   amount: bigint,
@@ -210,10 +182,7 @@ function createOutputDescription(
   const pkHash = hexToBytes(recipientPkHashHex);
   const randomness = generateRandomness();
 
-  // Compute note commitment
   const commitment = computeNoteCommitment(amount, pkHash, randomness);
-
-  // Encrypt the note
   const encrypted = encryptNote(amount, pkHash, randomness, viewingKey);
 
   return {
@@ -227,22 +196,13 @@ function createOutputDescription(
   };
 }
 
-/**
- * Estimate the fee for a transaction.
- * Simple estimation based on number of spends and outputs.
- */
 export function estimateFee(numSpends: number, numOutputs: number): bigint {
-  // Base fee + per-spend + per-output
-  const baseFee = 1_000_000n; // 0.001 PSTR
-  const perSpend = 500_000n;  // 0.0005 PSTR
-  const perOutput = 500_000n; // 0.0005 PSTR
-
+  const baseFee = 1_000_000n;
+  const perSpend = 500_000n;
+  const perOutput = 500_000n;
   return baseFee + BigInt(numSpends) * perSpend + BigInt(numOutputs) * perOutput;
 }
 
-/**
- * Validate transaction parameters before building.
- */
 export function validateTransactionParams(params: TransactionParams): string | null {
   const { spendNotes, recipients, fee } = params;
 
@@ -283,12 +243,9 @@ export function validateTransactionParams(params: TransactionParams): string | n
     return `Insufficient funds: have ${totalSpend}, need ${totalOutput + fee}`;
   }
 
-  return null; // Valid
+  return null;
 }
 
-/**
- * Format transaction summary for display.
- */
 export function formatTransactionSummary(
   spendNotes: WalletNote[],
   recipients: { pkHash: string; amount: bigint }[],
