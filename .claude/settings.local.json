@@ -44,7 +44,8 @@
       "Bash(~/.fly/bin/flyctl deploy:*)",
       "Bash(~/.fly/bin/flyctl ssh console -C \"rm -rf /app/data/*\")",
       "Bash(~/.fly/bin/flyctl logs:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(cargo search:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

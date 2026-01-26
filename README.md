@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Postera Logo" width="120">
+</p>
+
 # Postera
 
 A privacy-focused cryptocurrency combining post-quantum cryptography with zero-knowledge proofs for quantum-resistant private transactions.
@@ -5,7 +9,7 @@ A privacy-focused cryptocurrency combining post-quantum cryptography with zero-k
 ## Features
 
 - **Post-Quantum Signatures**: Uses ML-DSA-65 (FIPS 204, formerly CRYSTALS-Dilithium), a lattice-based signature scheme standardized by NIST
-- **Shielded Transactions**: Privacy by default using zk-SNARKs (Groth16 on BLS12-381)
+- **Shielded Transactions**: Privacy model using zk-SNARKs (Groth16 on BLS12-381) - _proof generation in development_
 - **Note-Based Model**: UTXO-style notes with commitments, nullifiers, and encrypted payloads (similar to Zcash)
 - **Viewing Keys**: Scan the blockchain for incoming transactions without spending ability
 - **Proof of Work Consensus**: Dynamic difficulty adjustment targeting 10-second block times
@@ -47,6 +51,7 @@ This starts 3 nodes locally (ports 8333, 8334, 8335) with Node1 mining enabled.
 ```
 
 This generates a wallet with:
+
 - ML-DSA-65 keypair (post-quantum signatures)
 - Nullifier key (for deriving nullifiers when spending)
 - Viewing key (for scanning incoming notes)
@@ -65,6 +70,7 @@ This generates a wallet with:
 ```
 
 The node exposes:
+
 - REST API at `http://localhost:8333`
 - Block Explorer at `http://localhost:8333/explorer`
 
@@ -79,6 +85,7 @@ npm run dev
 ```
 
 The wallet provides:
+
 - Client-side ML-DSA-65 key generation (keys never leave your browser)
 - Wallet import/export
 - Message signing with quantum-resistant signatures
@@ -108,29 +115,29 @@ Shielded transactions require ZK proof generation. CLI support in development:
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `POSTERA_PORT` | Listen port | 8333 (8080 in Docker) |
-| `POSTERA_DATA_DIR` | Blockchain data directory | `./data` |
-| `POSTERA_SEEDS` | Comma-separated seed node URLs | - |
-| `POSTERA_MINE_ADDRESS` | Address to receive mining rewards | - |
-| `RUST_LOG` | Log level (error/warn/info/debug) | info |
+| Variable               | Description                       | Default               |
+| ---------------------- | --------------------------------- | --------------------- |
+| `POSTERA_PORT`         | Listen port                       | 8333 (8080 in Docker) |
+| `POSTERA_DATA_DIR`     | Blockchain data directory         | `./data`              |
+| `POSTERA_SEEDS`        | Comma-separated seed node URLs    | -                     |
+| `POSTERA_MINE_ADDRESS` | Address to receive mining rewards | -                     |
+| `RUST_LOG`             | Log level (error/warn/info/debug) | info                  |
 
 ## API Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /chain/info` | Blockchain metadata (height, difficulty, etc.) |
-| `GET /block/:hash` | Get block by hash |
-| `GET /block/height/:height` | Get block by height |
-| `GET /account/:address` | Account balance and nonce |
-| `POST /tx` | Submit a signed transaction |
-| `GET /blocks/since/:height` | Sync blocks from a height |
-| `GET /peers` | List connected peers |
-| `POST /peers` | Add a new peer |
-| `GET /accounts/top` | View top account holders |
-| `POST /wallet/generate` | Generate a new wallet |
-| `POST /wallet/send` | Create and broadcast a transaction |
+| Endpoint                    | Description                                    |
+| --------------------------- | ---------------------------------------------- |
+| `GET /chain/info`           | Blockchain metadata (height, difficulty, etc.) |
+| `GET /block/:hash`          | Get block by hash                              |
+| `GET /block/height/:height` | Get block by height                            |
+| `GET /account/:address`     | Account balance and nonce                      |
+| `POST /tx`                  | Submit a signed transaction                    |
+| `GET /blocks/since/:height` | Sync blocks from a height                      |
+| `GET /peers`                | List connected peers                           |
+| `POST /peers`               | Add a new peer                                 |
+| `GET /accounts/top`         | View top account holders                       |
+| `POST /wallet/generate`     | Generate a new wallet                          |
+| `POST /wallet/send`         | Create and broadcast a transaction             |
 
 ## Architecture
 
@@ -185,6 +192,7 @@ fly deploy
 ```
 
 Configuration:
+
 - 512MB memory, shared-cpu-1x VM
 - Persistent volume for blockchain data
 - Health checks via `/chain/info`
@@ -196,22 +204,24 @@ Configuration:
 
 Postera uses ML-DSA-65 (FIPS 204), the NIST-standardized version of CRYSTALS-Dilithium:
 
-| Parameter | Size |
-|-----------|------|
+| Parameter  | Size        |
+| ---------- | ----------- |
 | Public Key | 1,952 bytes |
 | Secret Key | 4,032 bytes |
-| Signature | 3,309 bytes |
+| Signature  | 3,309 bytes |
 
 ### Zero-Knowledge Proofs (Groth16)
 
 Shielded transactions use zk-SNARKs on the BLS12-381 curve:
 
-| Component | Description |
-|-----------|-------------|
-| Proving System | Groth16 (constant-size proofs) |
-| Curve | BLS12-381 (128-bit security) |
-| Commitment Scheme | Pedersen commitments |
-| Encryption | ChaCha20-Poly1305 (note encryption) |
+| Component         | Description                         |
+| ----------------- | ----------------------------------- |
+| Proving System    | Groth16 (constant-size proofs)      |
+| Curve             | BLS12-381 (128-bit security)        |
+| Commitment Scheme | Pedersen commitments                |
+| Encryption        | ChaCha20-Poly1305 (note encryption) |
+
+> **Note**: The ZK circuit infrastructure (R1CS constraints, arkworks integration) is implemented, but proof generation is not yet wired into transaction creation. Proofs are currently placeholder values.
 
 ## Privacy Model
 
@@ -226,12 +236,12 @@ Postera implements a Zcash-style shielded transaction model:
 
 ### What's Public vs Private
 
-| Public | Private |
-|--------|---------|
-| Transaction fee | Sender identity |
-| Note commitments | Recipient identity |
+| Public              | Private             |
+| ------------------- | ------------------- |
+| Transaction fee     | Sender identity     |
+| Note commitments    | Recipient identity  |
 | Nullifiers (opaque) | Transaction amounts |
-| Block height | Note contents |
+| Block height        | Note contents       |
 
 ## License
 

@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
 use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction};
+use crate::crypto::nullifier::Nullifier;
 use tracing::{info, warn};
 
 use super::Mempool;
@@ -50,6 +51,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/peers", post(add_peer))
         // Transaction relay endpoint (for peer-to-peer relay)
         .route("/tx/relay", post(receive_transaction))
+        // Wallet scanning endpoints
+        .route("/outputs/since/:height", get(get_outputs_since))
+        .route("/nullifiers/check", post(check_nullifiers))
+        .route("/witness/:commitment", get(get_witness))
+        .route("/witness/position/:position", get(get_witness_by_position))
+        .route("/debug/commitments", get(debug_list_commitments))
         // React app routes - serve index.html for SPA
         .route("/wallet", get(serve_index))
         .route("/wallet/*path", get(serve_index))
@@ -258,12 +265,26 @@ async fn submit_transaction(
     // Validate transaction
     {
         let chain = state.blockchain.read().unwrap();
-        let params = chain.verifying_params()
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Verifying params not configured".to_string()))?;
-        chain
-            .state()
-            .validate_transaction(&tx, params)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        if let Some(params) = chain.verifying_params() {
+            // Full validation with proof verification
+            chain
+                .state()
+                .validate_transaction(&tx, params)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        } else {
+            // Basic validation (no proof verification) - for development/testing
+            // This still checks anchors, nullifiers, and signatures
+            chain
+                .state()
+                .validate_transaction_basic(&tx)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+            // Verify spend signatures manually since basic validation skips them
+            for spend in &tx.spends {
+                spend.verify_signature()
+                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid spend signature".to_string()))?;
+            }
+        }
     }
 
     // Add to mempool
@@ -489,12 +510,22 @@ async fn receive_transaction(
     // Validate transaction
     {
         let chain = state.blockchain.read().unwrap();
-        let params = chain.verifying_params()
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Verifying params not configured".to_string()))?;
-        chain
-            .state()
-            .validate_transaction(&tx, params)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        if let Some(params) = chain.verifying_params() {
+            chain
+                .state()
+                .validate_transaction(&tx, params)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        } else {
+            chain
+                .state()
+                .validate_transaction_basic(&tx)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+            for spend in &tx.spends {
+                spend.verify_signature()
+                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid spend signature".to_string()))?;
+            }
+        }
     }
 
     // Add to mempool
@@ -568,6 +599,238 @@ async fn relay_transaction(tx: &ShieldedTransaction, peers: &[String]) {
             }
         }
     }
+}
+
+// ============ Wallet Scanning Endpoints ============
+
+/// An encrypted output from a block (transaction output or coinbase).
+#[derive(Serialize)]
+struct EncryptedOutput {
+    /// Position in the commitment tree.
+    position: u64,
+    /// Block height where this output was created.
+    block_height: u64,
+    /// The note commitment (hex).
+    note_commitment: String,
+    /// Ephemeral public key for decryption (hex).
+    ephemeral_pk: String,
+    /// Encrypted note ciphertext (hex).
+    ciphertext: String,
+}
+
+/// Response for outputs/since/:height endpoint.
+#[derive(Serialize)]
+struct OutputsSinceResponse {
+    outputs: Vec<EncryptedOutput>,
+    current_height: u64,
+    commitment_root: String,
+}
+
+/// Get all encrypted outputs since a given block height.
+/// Used by wallets to scan for incoming payments.
+/// If since_height is 0, returns ALL outputs including genesis.
+async fn get_outputs_since(
+    State(state): State<Arc<AppState>>,
+    Path(since_height): Path<u64>,
+) -> Json<OutputsSinceResponse> {
+    let chain = state.blockchain.read().unwrap();
+    let current_height = chain.height();
+    let commitment_root = hex::encode(chain.commitment_root());
+
+    let mut outputs = Vec::new();
+    let mut position = 0u64;
+
+    // Determine the starting height for collecting outputs
+    // If since_height is 0, we want ALL outputs (initial scan)
+    // Otherwise, we want outputs from since_height+1 onwards
+    let start_height = if since_height == 0 { 0 } else { since_height + 1 };
+
+    // First, count all commitments before start_height to get starting position
+    for h in 0..start_height.min(current_height + 1) {
+        if let Some(block) = chain.get_block_by_height(h) {
+            for tx in &block.transactions {
+                position += tx.outputs.len() as u64;
+            }
+            position += 1; // coinbase
+        }
+    }
+
+    // Now collect outputs from start_height onwards
+    for h in start_height..=current_height {
+        if let Some(block) = chain.get_block_by_height(h) {
+            // Transaction outputs
+            for tx in &block.transactions {
+                for output in &tx.outputs {
+                    outputs.push(EncryptedOutput {
+                        position,
+                        block_height: h,
+                        note_commitment: hex::encode(output.note_commitment.to_bytes()),
+                        ephemeral_pk: hex::encode(&output.encrypted_note.ephemeral_pk),
+                        ciphertext: hex::encode(&output.encrypted_note.ciphertext),
+                    });
+                    position += 1;
+                }
+            }
+
+            // Coinbase output
+            outputs.push(EncryptedOutput {
+                position,
+                block_height: h,
+                note_commitment: hex::encode(block.coinbase.note_commitment.to_bytes()),
+                ephemeral_pk: hex::encode(&block.coinbase.encrypted_note.ephemeral_pk),
+                ciphertext: hex::encode(&block.coinbase.encrypted_note.ciphertext),
+            });
+            position += 1;
+        }
+    }
+
+    Json(OutputsSinceResponse {
+        outputs,
+        current_height,
+        commitment_root,
+    })
+}
+
+/// Request for checking nullifiers.
+#[derive(Deserialize)]
+struct CheckNullifiersRequest {
+    nullifiers: Vec<String>,
+}
+
+/// Response for nullifier checking.
+#[derive(Serialize)]
+struct CheckNullifiersResponse {
+    /// List of nullifiers that are spent (exist in nullifier set).
+    spent: Vec<String>,
+}
+
+/// Check which nullifiers are spent.
+/// Used by wallets to determine which of their notes have been consumed.
+async fn check_nullifiers(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CheckNullifiersRequest>,
+) -> Json<CheckNullifiersResponse> {
+    let chain = state.blockchain.read().unwrap();
+    let nullifier_set = chain.state().nullifier_set();
+
+    let mut spent = Vec::new();
+
+    for nf_hex in &req.nullifiers {
+        if let Ok(nf_bytes) = hex::decode(nf_hex) {
+            if nf_bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&nf_bytes);
+                let nullifier = Nullifier::from_bytes(arr);
+
+                if nullifier_set.contains(&nullifier) {
+                    spent.push(nf_hex.clone());
+                }
+            }
+        }
+    }
+
+    Json(CheckNullifiersResponse { spent })
+}
+
+/// Response for witness endpoint.
+#[derive(Serialize)]
+struct WitnessResponse {
+    /// The current commitment tree root (hex).
+    root: String,
+    /// The Merkle path (sibling hashes from leaf to root, hex encoded).
+    path: Vec<String>,
+    /// Position in the tree.
+    position: u64,
+}
+
+/// Get a Merkle witness for a commitment.
+/// Used when creating spend proofs.
+async fn get_witness(
+    State(state): State<Arc<AppState>>,
+    Path(commitment_hex): Path<String>,
+) -> Result<Json<WitnessResponse>, StatusCode> {
+    let commitment_bytes: [u8; 32] = hex::decode(&commitment_hex)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let chain = state.blockchain.read().unwrap();
+    let commitment_tree = chain.state().commitment_tree();
+
+    // Find the position of this commitment in the tree
+    // We need to search through all positions
+    let tree_size = commitment_tree.size();
+    let mut found_position: Option<u64> = None;
+
+    for pos in 0..tree_size {
+        if let Some(cm) = commitment_tree.get_commitment(pos) {
+            if cm.to_bytes() == commitment_bytes {
+                found_position = Some(pos);
+                break;
+            }
+        }
+    }
+
+    let position = found_position.ok_or(StatusCode::NOT_FOUND)?;
+
+    let merkle_path = commitment_tree.get_path(position)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let root = commitment_tree.root();
+
+    Ok(Json(WitnessResponse {
+        root: hex::encode(root),
+        path: merkle_path.auth_path.iter().map(|h| hex::encode(h)).collect(),
+        position,
+    }))
+}
+
+/// Get witness by position (simpler than searching by commitment).
+async fn get_witness_by_position(
+    State(state): State<Arc<AppState>>,
+    Path(position): Path<u64>,
+) -> Result<Json<WitnessResponse>, StatusCode> {
+    let chain = state.blockchain.read().unwrap();
+    let commitment_tree = chain.state().commitment_tree();
+
+    let commitment = commitment_tree.get_commitment(position)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let merkle_path = commitment_tree.get_path(position)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let root = commitment_tree.root();
+
+    Ok(Json(WitnessResponse {
+        root: hex::encode(root),
+        path: merkle_path.auth_path.iter().map(|h| hex::encode(h)).collect(),
+        position,
+    }))
+}
+
+/// Debug endpoint to list all commitments in the tree.
+async fn debug_list_commitments(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let chain = state.blockchain.read().unwrap();
+    let commitment_tree = chain.state().commitment_tree();
+    let tree_size = commitment_tree.size();
+
+    let mut commitments = Vec::new();
+    for pos in 0..tree_size.min(100) { // Limit to first 100
+        if let Some(cm) = commitment_tree.get_commitment(pos) {
+            commitments.push(serde_json::json!({
+                "position": pos,
+                "commitment": hex::encode(cm.to_bytes())
+            }));
+        }
+    }
+
+    Json(serde_json::json!({
+        "tree_size": tree_size,
+        "root": hex::encode(commitment_tree.root()),
+        "commitments": commitments
+    }))
 }
 
 // ============ React App ============

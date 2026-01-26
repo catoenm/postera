@@ -35,7 +35,7 @@ COPY --from=builder /app/target/release/postera /app/postera
 COPY static ./static
 
 # Copy wallet file for mining
-COPY shielded-wallet.json ./shielded-wallet.json
+COPY wallet.json ./wallet.json
 
 # Create data directory
 RUN mkdir -p /app/data
@@ -50,4 +50,4 @@ ENV POSTERA_DATA_DIR=/app/data
 ENV POSTERA_PORT=8080
 
 # Run the node with mining enabled
-CMD ["/app/postera", "node", "--mine", "/app/shielded-wallet.json"]
+CMD ["/app/postera", "node", "--mine", "/app/wallet.json"]

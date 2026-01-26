@@ -10,6 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@noble/ciphers": "^2.1.1",
+    "@noble/hashes": "^2.0.1",
     "@noble/post-quantum": "^0.5.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

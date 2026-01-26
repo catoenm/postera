@@ -1,14 +1,20 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import {
   generateKeyPair,
-  deriveAddress,
   bytesToHex,
   hexToBytes,
   sign,
   MLDSA65_PK_SIZE,
   MLDSA65_SK_SIZE,
 } from './crypto';
+import { computePkHash } from './shielded-crypto';
+import { ShieldedWallet } from './shielded-wallet';
+import {
+  createShieldedTransaction,
+  validateTransactionParams,
+} from './transaction-builder';
+import { submitShieldedTransaction } from './api';
 import type { Wallet as WalletType } from './types';
 import './App.css';
 
@@ -19,13 +25,23 @@ export default function Wallet() {
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<'wallet' | 'send' | 'receive' | 'sign'>('wallet');
 
+  // Shielded wallet state
+  const [shieldedWallet, setShieldedWallet] = useState<ShieldedWallet | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanStatus, setScanStatus] = useState<string>('');
+  const [balance, setBalance] = useState<string>('0');
+  const [unspentCount, setUnspentCount] = useState(0);
+
   // Sign message state
   const [messageToSign, setMessageToSign] = useState('');
   const [signedResult, setSignedResult] = useState<{ message: string; signature: string } | null>(null);
 
-  // Send form state (disabled for now - shielded transactions not yet implemented)
+  // Send form state
   const [sendTo, setSendTo] = useState('');
   const [sendAmount, setSendAmount] = useState('');
+  const [sendFee, setSendFee] = useState('0.001');
+  const [sending, setSending] = useState(false);
+  const [sendResult, setSendResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Import form state
   const [showImport, setShowImport] = useState(false);
@@ -48,12 +64,55 @@ export default function Wallet() {
     setLoading(false);
   }, []);
 
+  // Initialize shielded wallet when wallet is loaded
+  useEffect(() => {
+    if (wallet) {
+      const sw = ShieldedWallet.fromHex(wallet.secret_key, wallet.public_key);
+      setShieldedWallet(sw);
+      updateBalanceDisplay(sw);
+    }
+  }, [wallet]);
+
+  // Update balance display from shielded wallet
+  const updateBalanceDisplay = useCallback((sw: ShieldedWallet) => {
+    const summary = sw.getSummary();
+    setBalance(summary.balance);
+    setUnspentCount(summary.unspentCount);
+  }, []);
+
+  // Scan for notes
+  const handleScan = async () => {
+    if (!shieldedWallet || scanning) return;
+
+    setScanning(true);
+    setScanStatus('Starting scan...');
+
+    try {
+      await shieldedWallet.scan((msg) => setScanStatus(msg));
+      updateBalanceDisplay(shieldedWallet);
+      setScanStatus('Scan complete');
+    } catch (e) {
+      setScanStatus(`Scan failed: ${(e as Error).message}`);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  // Auto-scan on wallet load
+  useEffect(() => {
+    if (shieldedWallet && !scanning && shieldedWallet.lastScannedHeight < 0) {
+      handleScan();
+    }
+  }, [shieldedWallet]);
+
   // Create new wallet
   const createWallet = async () => {
     setLoading(true);
     try {
       const { publicKey, secretKey } = generateKeyPair();
-      const address = await deriveAddress(publicKey);
+      // Use computePkHash for shielded address (32 bytes -> 64 hex)
+      const pkHash = computePkHash(publicKey);
+      const address = bytesToHex(pkHash);
 
       const newWallet: WalletType = {
         address,
@@ -92,7 +151,8 @@ export default function Wallet() {
 
     try {
       const publicKeyBytes = hexToBytes(pk);
-      const address = await deriveAddress(publicKeyBytes);
+      const pkHash = computePkHash(publicKeyBytes);
+      const address = bytesToHex(pkHash);
 
       const newWallet: WalletType = {
         address,
@@ -114,7 +174,9 @@ export default function Wallet() {
   const logout = () => {
     if (confirm('Are you sure you want to logout? Make sure you have backed up your keys!')) {
       localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem('postera_shielded_state');
       setWallet(null);
+      setShieldedWallet(null);
     }
   };
 
@@ -138,6 +200,81 @@ export default function Wallet() {
       });
     } catch (e) {
       alert('Failed to sign message: ' + (e as Error).message);
+    }
+  };
+
+  // Send shielded transaction
+  const handleSend = async () => {
+    if (!wallet || !shieldedWallet || sending) return;
+
+    setSending(true);
+    setSendResult(null);
+
+    try {
+      // Parse amounts
+      const amount = ShieldedWallet.parseAmount(sendAmount);
+      const fee = ShieldedWallet.parseAmount(sendFee);
+
+      // Validate recipient
+      const recipientPkHash = sendTo.trim();
+      if (recipientPkHash.length !== 64) {
+        throw new Error('Recipient pk_hash must be 64 hex characters');
+      }
+
+      // Select notes
+      const notesToSpend = shieldedWallet.selectNotes(amount + fee);
+
+      // Validate
+      const validationError = validateTransactionParams({
+        spendNotes: notesToSpend,
+        recipients: [{ pkHash: recipientPkHash, amount }],
+        fee,
+        secretKey: hexToBytes(wallet.secret_key),
+        publicKey: hexToBytes(wallet.public_key),
+        senderPkHash: shieldedWallet.pkHash,
+      });
+
+      if (validationError) {
+        throw new Error(validationError);
+      }
+
+      // Build transaction
+      const tx = await createShieldedTransaction({
+        spendNotes: notesToSpend,
+        recipients: [{ pkHash: recipientPkHash, amount }],
+        fee,
+        secretKey: hexToBytes(wallet.secret_key),
+        publicKey: hexToBytes(wallet.public_key),
+        senderPkHash: shieldedWallet.pkHash,
+      });
+
+      // Submit
+      const result = await submitShieldedTransaction(tx);
+
+      if ('error' in result) {
+        throw new Error(result.error);
+      }
+
+      setSendResult({
+        success: true,
+        message: `Transaction submitted! Hash: ${result.hash.slice(0, 16)}...`,
+      });
+
+      // Clear form
+      setSendTo('');
+      setSendAmount('');
+
+      // Refresh balance after a delay
+      setTimeout(() => {
+        handleScan();
+      }, 2000);
+    } catch (e) {
+      setSendResult({
+        success: false,
+        message: (e as Error).message,
+      });
+    } finally {
+      setSending(false);
     }
   };
 
@@ -227,11 +364,31 @@ export default function Wallet() {
           <div className="card">
             <h2>Shielded Balance</h2>
             <div className="balance shielded">
-              [Shielded]
+              {scanning ? (
+                <span className="scanning">Scanning...</span>
+              ) : (
+                <>
+                  {balance} <span className="currency">PSTR</span>
+                </>
+              )}
             </div>
-            <p className="shielded-note">
-              Your balance is encrypted on-chain. Note scanning coming soon.
-            </p>
+            {!scanning && (
+              <p className="note-count">
+                {unspentCount} unspent note{unspentCount !== 1 ? 's' : ''}
+              </p>
+            )}
+            {scanStatus && (
+              <p className="scan-status">{scanStatus}</p>
+            )}
+            <div className="button-row">
+              <button
+                onClick={handleScan}
+                disabled={scanning}
+                className="secondary"
+              >
+                {scanning ? 'Scanning...' : 'Refresh Balance'}
+              </button>
+            </div>
             <p className="address">
               <span className="label">Public Key Hash:</span>
               <code>{wallet.address}</code>
@@ -267,33 +424,57 @@ export default function Wallet() {
       {view === 'send' && (
         <div className="card">
           <h2>Send PSTR</h2>
-          <p className="shielded-note">
-            Shielded transactions require ZK proof generation. Coming soon.
+          <p className="info-text">
+            Send shielded PSTR to another wallet. Only the recipient can see the amount.
           </p>
-          <div className="form-group disabled">
+
+          <div className="form-group">
             <label>Recipient Public Key Hash</label>
             <input
               type="text"
               value={sendTo}
               onChange={(e) => setSendTo(e.target.value)}
-              placeholder="Enter recipient pk_hash..."
-              disabled
+              placeholder="64-character hex pk_hash"
+              disabled={sending}
             />
           </div>
-          <div className="form-group disabled">
+
+          <div className="form-group">
             <label>Amount (PSTR)</label>
             <input
-              type="number"
-              step="0.000001"
+              type="text"
               value={sendAmount}
               onChange={(e) => setSendAmount(e.target.value)}
-              placeholder="0.000000"
-              disabled
+              placeholder="0.000000000"
+              disabled={sending}
+            />
+            {shieldedWallet && (
+              <small className="helper-text">
+                Available: {balance} PSTR
+              </small>
+            )}
+          </div>
+
+          <div className="form-group">
+            <label>Fee (PSTR)</label>
+            <input
+              type="text"
+              value={sendFee}
+              onChange={(e) => setSendFee(e.target.value)}
+              placeholder="0.001"
+              disabled={sending}
             />
           </div>
-          <button disabled>
-            Send (Coming Soon)
+
+          <button onClick={handleSend} disabled={sending || !sendTo || !sendAmount}>
+            {sending ? 'Sending...' : 'Send'}
           </button>
+
+          {sendResult && (
+            <div className={`result ${sendResult.success ? 'success' : 'error'}`}>
+              {sendResult.message}
+            </div>
+          )}
         </div>
       )}
 
