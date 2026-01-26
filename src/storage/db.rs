@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::core::{Account, Block};
+use crate::core::{Account, ShieldedBlock};
 use crate::crypto::Address;
 
 /// Sled-based key-value database for persistent storage.
@@ -55,7 +55,7 @@ impl Database {
     }
 
     /// Save a block to the database.
-    pub fn save_block(&self, block: &Block, height: u64) -> Result<(), DatabaseError> {
+    pub fn save_block(&self, block: &ShieldedBlock, height: u64) -> Result<(), DatabaseError> {
         let hash = block.hash();
         let data = serde_json::to_vec(block)?;
 
@@ -69,10 +69,10 @@ impl Database {
     }
 
     /// Load a block by hash.
-    pub fn load_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, DatabaseError> {
+    pub fn load_block(&self, hash: &[u8; 32]) -> Result<Option<ShieldedBlock>, DatabaseError> {
         match self.blocks.get(hash)? {
             Some(data) => {
-                let block: Block = serde_json::from_slice(&data)?;
+                let block: ShieldedBlock = serde_json::from_slice(&data)?;
                 Ok(Some(block))
             }
             None => Ok(None),
@@ -80,7 +80,7 @@ impl Database {
     }
 
     /// Load a block by height.
-    pub fn load_block_by_height(&self, height: u64) -> Result<Option<Block>, DatabaseError> {
+    pub fn load_block_by_height(&self, height: u64) -> Result<Option<ShieldedBlock>, DatabaseError> {
         match self.block_heights.get(&height.to_be_bytes())? {
             Some(hash) => {
                 let hash: [u8; 32] = hash
@@ -164,8 +164,21 @@ pub enum DatabaseError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Transaction;
-    use crate::crypto::KeyPair;
+    use crate::core::CoinbaseTransaction;
+    use crate::crypto::commitment::NoteCommitment;
+    use crate::crypto::note::EncryptedNote;
+
+    fn dummy_coinbase(height: u64) -> CoinbaseTransaction {
+        CoinbaseTransaction::new(
+            NoteCommitment([1u8; 32]),
+            EncryptedNote {
+                ciphertext: vec![0; 64],
+                ephemeral_pk: vec![0; 32],
+            },
+            50,
+            height,
+        )
+    }
 
     #[test]
     fn test_database_creation() {
@@ -177,9 +190,15 @@ mod tests {
     fn test_save_and_load_block() {
         let db = Database::in_memory().unwrap();
 
-        let miner = KeyPair::generate();
-        let coinbase = Transaction::coinbase(miner.address(), 50);
-        let block = Block::new([0u8; 32], vec![coinbase], 0);
+        let coinbase = dummy_coinbase(0);
+        let block = ShieldedBlock::new(
+            [0u8; 32],
+            vec![],
+            coinbase,
+            [0u8; 32],
+            [0u8; 32],
+            0,
+        );
         let hash = block.hash();
 
         db.save_block(&block, 0).unwrap();
@@ -192,9 +211,15 @@ mod tests {
     fn test_load_block_by_height() {
         let db = Database::in_memory().unwrap();
 
-        let miner = KeyPair::generate();
-        let coinbase = Transaction::coinbase(miner.address(), 50);
-        let block = Block::new([0u8; 32], vec![coinbase], 0);
+        let coinbase = dummy_coinbase(42);
+        let block = ShieldedBlock::new(
+            [0u8; 32],
+            vec![],
+            coinbase,
+            [0u8; 32],
+            [0u8; 32],
+            0,
+        );
 
         db.save_block(&block, 42).unwrap();
 
@@ -206,14 +231,28 @@ mod tests {
     fn test_get_height() {
         let db = Database::in_memory().unwrap();
 
-        let miner = KeyPair::generate();
-        let coinbase = Transaction::coinbase(miner.address(), 50);
-        let block = Block::new([0u8; 32], vec![coinbase], 0);
+        let coinbase = dummy_coinbase(0);
+        let block = ShieldedBlock::new(
+            [0u8; 32],
+            vec![],
+            coinbase,
+            [0u8; 32],
+            [0u8; 32],
+            0,
+        );
 
         db.save_block(&block, 0).unwrap();
         assert_eq!(db.get_height().unwrap(), Some(0));
 
-        let block2 = Block::new(block.hash(), vec![], 0);
+        let coinbase2 = dummy_coinbase(1);
+        let block2 = ShieldedBlock::new(
+            block.hash(),
+            vec![],
+            coinbase2,
+            [0u8; 32],
+            [0u8; 32],
+            0,
+        );
         db.save_block(&block2, 1).unwrap();
         assert_eq!(db.get_height().unwrap(), Some(1));
     }

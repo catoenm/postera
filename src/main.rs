@@ -4,14 +4,14 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use postera::config::{self, GENESIS_DIFFICULTY};
 use postera::consensus::mine_block;
-use postera::core::Blockchain;
-use postera::crypto::Address;
+use postera::core::ShieldedBlockchain;
+use postera::crypto::note::ViewingKey;
 use postera::network::{create_router, Mempool};
-use postera::wallet::Wallet;
+use postera::wallet::ShieldedWallet;
 
 #[derive(Parser)]
 #[command(name = "postera")]
-#[command(about = "Postera - A post-quantum cryptocurrency", long_about = None)]
+#[command(about = "Postera - A privacy-preserving post-quantum cryptocurrency", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -19,41 +19,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate a new wallet (keypair)
+    /// Generate a new shielded wallet
     NewWallet {
         /// Output file for the wallet (default: wallet.json)
         #[arg(short, long, default_value = "wallet.json")]
         output: String,
     },
-    /// Check balance of an address
+    /// Show wallet balance (scans blockchain for owned notes)
     Balance {
-        /// The address to check
-        address: String,
-        /// Node URL to query
-        #[arg(short, long, default_value = "http://localhost:8333")]
-        node: String,
-    },
-    /// Send coins to an address
-    Send {
-        /// Recipient address
-        to: String,
-        /// Amount to send
-        amount: u64,
-        /// Transaction fee
-        #[arg(short, long, default_value = "1000")]
-        fee: u64,
         /// Wallet file
         #[arg(short, long, default_value = "wallet.json")]
         wallet: String,
-        /// Node URL to submit transaction
+        /// Node URL to query
         #[arg(short, long, default_value = "http://localhost:8333")]
         node: String,
     },
     /// Start mining blocks
     Mine {
-        /// Address to receive mining rewards
-        #[arg(short, long)]
-        address: String,
+        /// Wallet file (mining rewards go to this wallet)
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: String,
         /// Number of blocks to mine (0 = unlimited)
         #[arg(short, long, default_value = "0")]
         blocks: u64,
@@ -72,7 +57,7 @@ enum Commands {
         /// Data directory (or set POSTERA_DATA_DIR env var)
         #[arg(short, long)]
         data_dir: Option<String>,
-        /// Enable mining to this address (or set POSTERA_MINE_ADDRESS env var)
+        /// Wallet file for mining (enables mining if provided)
         #[arg(long)]
         mine: Option<String>,
         /// Disable connecting to seed nodes
@@ -98,24 +83,15 @@ async fn main() -> anyhow::Result<()> {
         Commands::NewWallet { output } => {
             cmd_new_wallet(&output)?;
         }
-        Commands::Balance { address, node } => {
-            cmd_balance(&address, &node).await?;
-        }
-        Commands::Send {
-            to,
-            amount,
-            fee,
-            wallet,
-            node,
-        } => {
-            cmd_send(&to, amount, fee, &wallet, &node).await?;
+        Commands::Balance { wallet, node } => {
+            cmd_balance(&wallet, &node).await?;
         }
         Commands::Mine {
-            address,
+            wallet,
             blocks,
             difficulty,
         } => {
-            cmd_mine(&address, blocks, difficulty)?;
+            cmd_mine(&wallet, blocks, difficulty)?;
         }
         Commands::Node {
             port,
@@ -127,7 +103,6 @@ async fn main() -> anyhow::Result<()> {
             // Use config defaults, with CLI/env overrides
             let port = port.unwrap_or_else(config::get_port);
             let data_dir = data_dir.unwrap_or_else(config::get_data_dir);
-            let mine = mine.or_else(config::get_mining_address);
 
             // Combine seed nodes with CLI peers
             let mut peers = if no_seeds {
@@ -145,101 +120,51 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn cmd_new_wallet(output: &str) -> anyhow::Result<()> {
-    println!("Generating new Postera wallet...");
-    let wallet = Wallet::generate();
+    println!("Generating new Postera shielded wallet...");
+    let wallet = ShieldedWallet::generate();
 
     wallet.save(output)?;
 
     println!("Wallet saved to: {}", output);
-    println!("Address: {}", wallet.address().to_hex());
-    println!("\nThis wallet uses CRYSTALS-Dilithium post-quantum signatures.");
+    println!("Address: {}", hex::encode(wallet.pk_hash()));
+    println!("\nThis wallet uses:");
+    println!("  - CRYSTALS-Dilithium post-quantum signatures");
+    println!("  - zk-SNARKs for private transactions");
+    println!("\nYour balance is private and can only be viewed with this wallet file.");
     Ok(())
 }
 
-async fn cmd_balance(address: &str, node: &str) -> anyhow::Result<()> {
-    let url = format!("{}/account/{}", node, address);
-
-    let client = reqwest::Client::new();
-    let resp = client.get(&url).send().await?;
-
-    if resp.status().is_success() {
-        let data: serde_json::Value = resp.json().await?;
-        let balance = data["balance"].as_u64().unwrap_or(0);
-        let nonce = data["nonce"].as_u64().unwrap_or(0);
-
-        println!("Address: {}", address);
-        println!("Balance: {} (smallest units)", balance);
-        println!("Nonce:   {}", nonce);
-    } else {
-        println!("Failed to fetch balance: {}", resp.status());
-    }
-
-    Ok(())
-}
-
-async fn cmd_send(to: &str, amount: u64, fee: u64, wallet_path: &str, node: &str) -> anyhow::Result<()> {
+async fn cmd_balance(wallet_path: &str, _node: &str) -> anyhow::Result<()> {
     // Load wallet
-    let wallet = Wallet::load(wallet_path)?;
-    println!("Loaded wallet: {}", wallet.address().to_hex());
+    let wallet = ShieldedWallet::load(wallet_path)?;
 
-    // Get current nonce from node
-    let url = format!("{}/account/{}", node, wallet.address().to_hex());
-    let client = reqwest::Client::new();
-    let resp = client.get(&url).send().await?;
-
-    let nonce = if resp.status().is_success() {
-        let data: serde_json::Value = resp.json().await?;
-        data["nonce"].as_u64().unwrap_or(0)
-    } else {
-        0
-    };
-
-    // Parse recipient address
-    let to_addr = Address::from_hex(to)?;
-
-    // Create and sign transaction
-    let tx = wallet.create_transaction(to_addr, amount, fee, nonce);
-
-    println!("Created transaction:");
-    println!("  From:   {}", tx.from);
-    println!("  To:     {}", tx.to);
-    println!("  Amount: {}", tx.amount);
-    println!("  Fee:    {}", tx.fee);
-    println!("  Nonce:  {}", tx.nonce);
-    println!("  Hash:   {}", tx.hash_hex());
-
-    // Submit to node
-    let submit_url = format!("{}/tx", node);
-    let resp = client
-        .post(&submit_url)
-        .json(&serde_json::json!({ "transaction": tx }))
-        .send()
-        .await?;
-
-    if resp.status().is_success() {
-        let result: serde_json::Value = resp.json().await?;
-        println!("\nTransaction submitted!");
-        println!("Status: {}", result["status"]);
-    } else {
-        let error = resp.text().await?;
-        println!("\nFailed to submit transaction: {}", error);
-    }
+    println!("Wallet: {}", wallet_path);
+    println!("Public key hash: {}", hex::encode(wallet.pk_hash()));
+    println!();
+    println!("Balance: {} (from {} unspent notes)", wallet.balance(), wallet.note_count());
+    println!();
+    println!("Note: To update your balance, run the node and let the wallet scan the blockchain.");
 
     Ok(())
 }
 
-fn cmd_mine(address: &str, blocks: u64, difficulty: u64) -> anyhow::Result<()> {
-    let miner_address = Address::from_hex(address)?;
+fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64) -> anyhow::Result<()> {
+    // Load wallet for mining rewards
+    let wallet = ShieldedWallet::load(wallet_path)?;
+    let miner_pk_hash = wallet.pk_hash();
+    let viewing_key = wallet.viewing_key().clone();
+
     println!("Starting standalone miner...");
-    println!("Miner address: {}", miner_address);
+    println!("Miner wallet: {}", wallet_path);
+    println!("Miner pk_hash: {}", hex::encode(miner_pk_hash));
     println!("Difficulty: {} leading zero bits", difficulty);
 
-    let mut blockchain = Blockchain::new(difficulty);
+    let mut blockchain = ShieldedBlockchain::with_miner(difficulty, miner_pk_hash, &viewing_key);
     let mut blocks_mined = 0u64;
 
     loop {
         let mempool_txs = vec![]; // Standalone miner has no mempool
-        let mut block = blockchain.create_block_template(miner_address, mempool_txs);
+        let mut block = blockchain.create_block_template(miner_pk_hash, &viewing_key, mempool_txs);
 
         println!(
             "\nMining block {} (prev: {}...)",
@@ -266,9 +191,9 @@ fn cmd_mine(address: &str, blocks: u64, difficulty: u64) -> anyhow::Result<()> {
 
         blocks_mined += 1;
         println!(
-            "  Chain height: {}, Miner balance: {}",
+            "  Chain height: {}, Commitments: {}",
             blockchain.height(),
-            blockchain.balance(&miner_address)
+            blockchain.state().commitment_count()
         );
 
         if blocks > 0 && blocks_mined >= blocks {
@@ -280,7 +205,7 @@ fn cmd_mine(address: &str, blocks: u64, difficulty: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine: Option<String>) -> anyhow::Result<()> {
+async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine_wallet: Option<String>) -> anyhow::Result<()> {
     use postera::network::{AppState, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
     use postera::consensus::mine_block;
     use std::sync::RwLock;
@@ -289,7 +214,7 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine: Option<St
     std::fs::create_dir_all(data_dir)?;
 
     println!("===========================================");
-    println!("         Postera Node v0.1.0");
+    println!("      Postera Shielded Node v0.2.0");
     println!("===========================================");
     println!();
     println!("Network:        {}", config::NETWORK_NAME);
@@ -298,18 +223,26 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine: Option<St
     println!("API endpoint:   http://0.0.0.0:{}", port);
     println!("Explorer:       http://localhost:{}/explorer", port);
     println!("Wallet:         http://localhost:{}/wallet", port);
-    if let Some(ref addr) = mine {
-        println!("Mining to:      {}", addr);
-    }
+
+    // Load miner wallet if provided
+    let miner_info = if let Some(wallet_path) = &mine_wallet {
+        let wallet = ShieldedWallet::load(wallet_path)?;
+        let pk_hash = wallet.pk_hash();
+        let viewing_key = wallet.viewing_key().clone();
+        println!("Mining to:      {} (pk_hash)", hex::encode(pk_hash));
+        Some((pk_hash, viewing_key))
+    } else {
+        None
+    };
+
     if !peers.is_empty() {
         println!("Seed peers:     {}", peers.len());
     }
     println!();
 
     // Initialize blockchain with persistence
-    // Always use GENESIS_DIFFICULTY for consistent genesis blocks
     let db_path = format!("{}/blockchain", data_dir);
-    let blockchain = Blockchain::open(&db_path, GENESIS_DIFFICULTY)?;
+    let blockchain = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY)?;
     let mempool = Mempool::new();
 
     let state = Arc::new(AppState {
@@ -373,8 +306,7 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine: Option<St
     }
 
     // Start integrated miner if requested
-    if let Some(miner_addr) = mine {
-        let miner_address = Address::from_hex(&miner_addr)?;
+    if let Some((miner_pk_hash, viewing_key)) = miner_info {
         let mine_state = state.clone();
 
         tokio::spawn(async move {
@@ -390,7 +322,7 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine: Option<St
                 // Create block template
                 let mut block = {
                     let chain = mine_state.blockchain.read().unwrap();
-                    chain.create_block_template(miner_address, mempool_txs)
+                    chain.create_block_template(miner_pk_hash, &viewing_key, mempool_txs)
                 };
 
                 let (height, difficulty) = {
@@ -421,12 +353,15 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine: Option<St
                             let tx_hashes: Vec<[u8; 32]> = mined_block
                                 .transactions
                                 .iter()
-                                .skip(1) // Skip coinbase
                                 .map(|tx| tx.hash())
                                 .collect();
 
                             let mut mempool = mine_state.mempool.write().unwrap();
                             mempool.remove_confirmed(&tx_hashes);
+
+                            // Remove transactions with spent nullifiers
+                            let nullifiers: Vec<_> = mined_block.nullifiers();
+                            mempool.remove_spent_nullifiers(&nullifiers);
 
                             // Re-validate remaining mempool transactions
                             let removed = mempool.revalidate(chain.state());

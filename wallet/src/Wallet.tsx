@@ -2,31 +2,35 @@ import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import {
   generateKeyPair,
-  deriveAddress,
   bytesToHex,
   hexToBytes,
   sign,
-  createSigningMessage,
   MLDSA65_PK_SIZE,
   MLDSA65_SK_SIZE,
 } from './crypto';
-import { getAccount, getTransactions, submitTransaction } from './api';
-import type { Wallet as WalletType, Account, Transaction } from './types';
+import { computePkHash } from './shielded-crypto';
+import { ShieldedWallet } from './shielded-wallet';
+import {
+  createShieldedTransaction,
+  validateTransactionParams,
+} from './transaction-builder';
+import { submitShieldedTransaction } from './api';
+import type { Wallet as WalletType } from './types';
 import './App.css';
 
 const STORAGE_KEY = 'postera_wallet';
-const COIN = 1_000_000_000n; // 1 coin = 10^9 base units
-
-function formatAmount(amount: number): string {
-  return (amount / Number(COIN)).toFixed(6);
-}
 
 export default function Wallet() {
   const [wallet, setWallet] = useState<WalletType | null>(null);
-  const [account, setAccount] = useState<Account | null>(null);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'wallet' | 'send' | 'receive' | 'history' | 'sign'>('wallet');
+  const [view, setView] = useState<'wallet' | 'send' | 'receive' | 'sign'>('wallet');
+
+  // Shielded wallet state
+  const [shieldedWallet, setShieldedWallet] = useState<ShieldedWallet | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanStatus, setScanStatus] = useState<string>('');
+  const [balance, setBalance] = useState<string>('0');
+  const [unspentCount, setUnspentCount] = useState(0);
 
   // Sign message state
   const [messageToSign, setMessageToSign] = useState('');
@@ -35,8 +39,9 @@ export default function Wallet() {
   // Send form state
   const [sendTo, setSendTo] = useState('');
   const [sendAmount, setSendAmount] = useState('');
-  const [sendFee, setSendFee] = useState('0.000001');
-  const [sendStatus, setSendStatus] = useState<{ type: 'success' | 'error' | 'loading'; message: string } | null>(null);
+  const [sendFee, setSendFee] = useState('0.001');
+  const [sending, setSending] = useState(false);
+  const [sendResult, setSendResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Import form state
   const [showImport, setShowImport] = useState(false);
@@ -59,40 +64,55 @@ export default function Wallet() {
     setLoading(false);
   }, []);
 
-  // Refresh account balance
-  const refreshBalance = useCallback(async () => {
-    if (!wallet) return;
-    const acc = await getAccount(wallet.address);
-    setAccount(acc);
-  }, [wallet]);
-
-  // Load transactions
-  const loadTransactions = useCallback(async () => {
-    if (!wallet) return;
-    const txs = await getTransactions(wallet.address);
-    setTransactions(txs);
-  }, [wallet]);
-
-  // Refresh data when wallet changes
+  // Initialize shielded wallet when wallet is loaded
   useEffect(() => {
     if (wallet) {
-      refreshBalance();
-      loadTransactions();
-      // Set up polling
-      const interval = setInterval(() => {
-        refreshBalance();
-        loadTransactions();
-      }, 10000);
-      return () => clearInterval(interval);
+      const sw = ShieldedWallet.fromHex(wallet.secret_key, wallet.public_key);
+      setShieldedWallet(sw);
+      updateBalanceDisplay(sw);
     }
-  }, [wallet, refreshBalance, loadTransactions]);
+  }, [wallet]);
+
+  // Update balance display from shielded wallet
+  const updateBalanceDisplay = useCallback((sw: ShieldedWallet) => {
+    const summary = sw.getSummary();
+    setBalance(summary.balance);
+    setUnspentCount(summary.unspentCount);
+  }, []);
+
+  // Scan for notes
+  const handleScan = async () => {
+    if (!shieldedWallet || scanning) return;
+
+    setScanning(true);
+    setScanStatus('Starting scan...');
+
+    try {
+      await shieldedWallet.scan((msg) => setScanStatus(msg));
+      updateBalanceDisplay(shieldedWallet);
+      setScanStatus('Scan complete');
+    } catch (e) {
+      setScanStatus(`Scan failed: ${(e as Error).message}`);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  // Auto-scan on wallet load
+  useEffect(() => {
+    if (shieldedWallet && !scanning && shieldedWallet.lastScannedHeight < 0) {
+      handleScan();
+    }
+  }, [shieldedWallet]);
 
   // Create new wallet
   const createWallet = async () => {
     setLoading(true);
     try {
       const { publicKey, secretKey } = generateKeyPair();
-      const address = await deriveAddress(publicKey);
+      // Use computePkHash for shielded address (32 bytes -> 64 hex)
+      const pkHash = computePkHash(publicKey);
+      const address = bytesToHex(pkHash);
 
       const newWallet: WalletType = {
         address,
@@ -131,7 +151,8 @@ export default function Wallet() {
 
     try {
       const publicKeyBytes = hexToBytes(pk);
-      const address = await deriveAddress(publicKeyBytes);
+      const pkHash = computePkHash(publicKeyBytes);
+      const address = bytesToHex(pkHash);
 
       const newWallet: WalletType = {
         address,
@@ -153,84 +174,9 @@ export default function Wallet() {
   const logout = () => {
     if (confirm('Are you sure you want to logout? Make sure you have backed up your keys!')) {
       localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem('postera_shielded_state');
       setWallet(null);
-      setAccount(null);
-      setTransactions([]);
-    }
-  };
-
-  // Send transaction
-  const handleSend = async () => {
-    if (!wallet) return;
-
-    const to = sendTo.trim();
-    if (!to || to.length !== 40) {
-      setSendStatus({ type: 'error', message: 'Invalid recipient address (40 hex characters)' });
-      return;
-    }
-
-    const amountCoins = parseFloat(sendAmount);
-    if (!amountCoins || amountCoins <= 0) {
-      setSendStatus({ type: 'error', message: 'Invalid amount' });
-      return;
-    }
-
-    const feeCoins = parseFloat(sendFee) || 0.000001;
-    const amount = BigInt(Math.round(amountCoins * Number(COIN)));
-    const fee = BigInt(Math.round(feeCoins * Number(COIN)));
-
-    setSendStatus({ type: 'loading', message: 'Fetching account nonce...' });
-
-    try {
-      // Get current nonce
-      const acc = await getAccount(wallet.address);
-      const nonce = BigInt(acc?.nonce || 0);
-
-      setSendStatus({ type: 'loading', message: 'Signing transaction...' });
-
-      // Build and sign transaction
-      const signingMessage = createSigningMessage(
-        wallet.address,
-        to,
-        amount,
-        fee,
-        nonce,
-        wallet.public_key
-      );
-
-      const secretKeyBytes = hexToBytes(wallet.secret_key);
-      const signatureBytes = sign(signingMessage, secretKeyBytes);
-      const signature = bytesToHex(signatureBytes);
-
-      setSendStatus({ type: 'loading', message: 'Submitting transaction...' });
-
-      // Submit
-      const fromBytes = Array.from(hexToBytes(wallet.address));
-      const toBytes = Array.from(hexToBytes(to));
-
-      const result = await submitTransaction({
-        from: fromBytes,
-        to: toBytes,
-        amount: Number(amount),
-        fee: Number(fee),
-        nonce: Number(nonce),
-        public_key: wallet.public_key,
-        signature,
-      });
-
-      if ('error' in result) {
-        setSendStatus({ type: 'error', message: result.error });
-      } else {
-        setSendStatus({ type: 'success', message: `Transaction sent! Hash: ${result.hash.slice(0, 16)}...` });
-        setSendTo('');
-        setSendAmount('');
-        setTimeout(() => {
-          refreshBalance();
-          loadTransactions();
-        }, 1000);
-      }
-    } catch (e) {
-      setSendStatus({ type: 'error', message: (e as Error).message });
+      setShieldedWallet(null);
     }
   };
 
@@ -254,6 +200,81 @@ export default function Wallet() {
       });
     } catch (e) {
       alert('Failed to sign message: ' + (e as Error).message);
+    }
+  };
+
+  // Send shielded transaction
+  const handleSend = async () => {
+    if (!wallet || !shieldedWallet || sending) return;
+
+    setSending(true);
+    setSendResult(null);
+
+    try {
+      // Parse amounts
+      const amount = ShieldedWallet.parseAmount(sendAmount);
+      const fee = ShieldedWallet.parseAmount(sendFee);
+
+      // Validate recipient
+      const recipientPkHash = sendTo.trim();
+      if (recipientPkHash.length !== 64) {
+        throw new Error('Recipient pk_hash must be 64 hex characters');
+      }
+
+      // Select notes
+      const notesToSpend = shieldedWallet.selectNotes(amount + fee);
+
+      // Validate
+      const validationError = validateTransactionParams({
+        spendNotes: notesToSpend,
+        recipients: [{ pkHash: recipientPkHash, amount }],
+        fee,
+        secretKey: hexToBytes(wallet.secret_key),
+        publicKey: hexToBytes(wallet.public_key),
+        senderPkHash: shieldedWallet.pkHash,
+      });
+
+      if (validationError) {
+        throw new Error(validationError);
+      }
+
+      // Build transaction
+      const tx = await createShieldedTransaction({
+        spendNotes: notesToSpend,
+        recipients: [{ pkHash: recipientPkHash, amount }],
+        fee,
+        secretKey: hexToBytes(wallet.secret_key),
+        publicKey: hexToBytes(wallet.public_key),
+        senderPkHash: shieldedWallet.pkHash,
+      });
+
+      // Submit
+      const result = await submitShieldedTransaction(tx);
+
+      if ('error' in result) {
+        throw new Error(result.error);
+      }
+
+      setSendResult({
+        success: true,
+        message: `Transaction submitted! Hash: ${result.hash.slice(0, 16)}...`,
+      });
+
+      // Clear form
+      setSendTo('');
+      setSendAmount('');
+
+      // Refresh balance after a delay
+      setTimeout(() => {
+        handleScan();
+      }, 2000);
+    } catch (e) {
+      setSendResult({
+        success: false,
+        message: (e as Error).message,
+      });
+    } finally {
+      setSending(false);
     }
   };
 
@@ -333,9 +354,6 @@ export default function Wallet() {
         <a className={view === 'receive' ? 'active' : ''} onClick={() => setView('receive')}>
           Receive
         </a>
-        <a className={view === 'history' ? 'active' : ''} onClick={() => setView('history')}>
-          History
-        </a>
         <a className={view === 'sign' ? 'active' : ''} onClick={() => setView('sign')}>
           Sign
         </a>
@@ -344,17 +362,37 @@ export default function Wallet() {
       {view === 'wallet' && (
         <>
           <div className="card">
-            <h2>Balance</h2>
-            <div className="balance">
-              {account ? formatAmount(account.balance) : '0.000000'} PSTR
+            <h2>Shielded Balance</h2>
+            <div className="balance shielded">
+              {scanning ? (
+                <span className="scanning">Scanning...</span>
+              ) : (
+                <>
+                  {balance} <span className="currency">PSTR</span>
+                </>
+              )}
+            </div>
+            {!scanning && (
+              <p className="note-count">
+                {unspentCount} unspent note{unspentCount !== 1 ? 's' : ''}
+              </p>
+            )}
+            {scanStatus && (
+              <p className="scan-status">{scanStatus}</p>
+            )}
+            <div className="button-row">
+              <button
+                onClick={handleScan}
+                disabled={scanning}
+                className="secondary"
+              >
+                {scanning ? 'Scanning...' : 'Refresh Balance'}
+              </button>
             </div>
             <p className="address">
-              <span className="label">Address:</span>
+              <span className="label">Public Key Hash:</span>
               <code>{wallet.address}</code>
             </p>
-            <button className="secondary" onClick={refreshBalance}>
-              Refresh
-            </button>
           </div>
 
           <div className="card">
@@ -386,41 +424,55 @@ export default function Wallet() {
       {view === 'send' && (
         <div className="card">
           <h2>Send PSTR</h2>
+          <p className="info-text">
+            Send shielded PSTR to another wallet. Only the recipient can see the amount.
+          </p>
+
           <div className="form-group">
-            <label>Recipient Address</label>
+            <label>Recipient Public Key Hash</label>
             <input
               type="text"
               value={sendTo}
               onChange={(e) => setSendTo(e.target.value)}
-              placeholder="Enter recipient address..."
+              placeholder="64-character hex pk_hash"
+              disabled={sending}
             />
           </div>
+
           <div className="form-group">
             <label>Amount (PSTR)</label>
             <input
-              type="number"
-              step="0.000001"
+              type="text"
               value={sendAmount}
               onChange={(e) => setSendAmount(e.target.value)}
-              placeholder="0.000000"
+              placeholder="0.000000000"
+              disabled={sending}
             />
+            {shieldedWallet && (
+              <small className="helper-text">
+                Available: {balance} PSTR
+              </small>
+            )}
           </div>
+
           <div className="form-group">
             <label>Fee (PSTR)</label>
             <input
-              type="number"
-              step="0.000001"
+              type="text"
               value={sendFee}
               onChange={(e) => setSendFee(e.target.value)}
+              placeholder="0.001"
+              disabled={sending}
             />
           </div>
-          <button onClick={handleSend} disabled={sendStatus?.type === 'loading'}>
-            {sendStatus?.type === 'loading' ? 'Sending...' : 'Send'}
+
+          <button onClick={handleSend} disabled={sending || !sendTo || !sendAmount}>
+            {sending ? 'Sending...' : 'Send'}
           </button>
 
-          {sendStatus && (
-            <div className={`status-message ${sendStatus.type}`}>
-              {sendStatus.message}
+          {sendResult && (
+            <div className={`result ${sendResult.success ? 'success' : 'error'}`}>
+              {sendResult.message}
             </div>
           )}
         </div>
@@ -429,53 +481,22 @@ export default function Wallet() {
       {view === 'receive' && (
         <div className="card">
           <h2>Receive PSTR</h2>
-          <p>Share your address to receive funds:</p>
-          <div className="address-display">
-            <code>{wallet.address}</code>
+          <p>Share your public key hash to receive shielded funds:</p>
+          <div className="form-group">
+            <label>Your Public Key Hash (pk_hash)</label>
+            <div className="address-display">
+              <code>{wallet.address}</code>
+            </div>
           </div>
           <button
             className="secondary"
             onClick={() => navigator.clipboard.writeText(wallet.address)}
           >
-            Copy Address
+            Copy pk_hash
           </button>
-        </div>
-      )}
-
-      {view === 'history' && (
-        <div className="card">
-          <h2>Transaction History</h2>
-          <button className="secondary" onClick={loadTransactions}>
-            Refresh
-          </button>
-
-          {transactions.length === 0 ? (
-            <p className="empty">No transactions yet</p>
-          ) : (
-            <ul className="tx-list">
-              {transactions.map((tx) => (
-                <li key={tx.hash} className="tx-item">
-                  <div className="tx-row">
-                    <span
-                      className={`tx-amount ${tx.from === wallet.address ? 'sent' : 'received'}`}
-                    >
-                      {tx.from === wallet.address ? '-' : '+'}
-                      {formatAmount(tx.amount)} PSTR
-                    </span>
-                    <span className={`status ${tx.status || 'pending'}`}>
-                      {tx.status || 'pending'}
-                    </span>
-                  </div>
-                  <div className="tx-hash">{tx.hash.slice(0, 32)}...</div>
-                  <div className="tx-parties">
-                    {tx.from === wallet.address
-                      ? `To: ${tx.to.slice(0, 8)}...`
-                      : `From: ${tx.from.slice(0, 8)}...`}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
+          <p className="shielded-note" style={{ marginTop: '16px' }}>
+            Senders will encrypt notes to your pk_hash. Only you can decrypt them.
+          </p>
         </div>
       )}
 

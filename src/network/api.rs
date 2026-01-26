@@ -1,3 +1,9 @@
+//! REST API for the shielded blockchain node.
+//!
+//! This API is privacy-preserving. Account balances and transaction
+//! amounts are not visible through the API. Only publicly observable
+//! data (block hashes, timestamps, fees) is exposed.
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -9,33 +15,33 @@ use tower_http::services::ServeDir;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
-use crate::core::{Block, Blockchain, ChainInfo, Transaction};
-use crate::crypto::Address;
-use crate::wallet::Wallet;
+use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction};
+use crate::crypto::nullifier::Nullifier;
 use tracing::{info, warn};
 
 use super::Mempool;
 
 /// Shared application state for the API.
 pub struct AppState {
-    pub blockchain: RwLock<Blockchain>,
+    pub blockchain: RwLock<ShieldedBlockchain>,
     pub mempool: RwLock<Mempool>,
     /// List of known peer URLs for gossip
     pub peers: RwLock<Vec<String>>,
 }
 
 /// Create the API router.
+///
+/// Note: This is a privacy-preserving blockchain. Account balances and
+/// transaction amounts are not visible through the API.
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/chain/info", get(chain_info))
         .route("/block/:hash", get(get_block))
         .route("/block/height/:height", get(get_block_by_height))
-        .route("/account/:address", get(get_account))
         .route("/tx", post(submit_transaction))
         .route("/tx/:hash", get(get_transaction))
         .route("/transactions/recent", get(get_recent_transactions))
-        .route("/transactions/:address", get(get_transactions_by_address))
         .route("/mempool", get(get_mempool))
         // Peer sync endpoints
         .route("/blocks", post(receive_block))
@@ -45,11 +51,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/peers", post(add_peer))
         // Transaction relay endpoint (for peer-to-peer relay)
         .route("/tx/relay", post(receive_transaction))
-        // Top holders
-        .route("/accounts/top", get(get_top_holders))
-        // Wallet API
-        .route("/wallet/generate", post(generate_wallet))
-        .route("/wallet/send", post(wallet_send))
+        // Wallet scanning endpoints
+        .route("/outputs/since/:height", get(get_outputs_since))
+        .route("/nullifiers/check", post(check_nullifiers))
+        .route("/witness/:commitment", get(get_witness))
+        .route("/witness/position/:position", get(get_witness_by_position))
+        .route("/debug/commitments", get(debug_list_commitments))
         // React app routes - serve index.html for SPA
         .route("/wallet", get(serve_index))
         .route("/wallet/*path", get(serve_index))
@@ -61,7 +68,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 }
 
 async fn index() -> &'static str {
-    "Postera Node API v0.1.0"
+    "Postera Shielded Node API v0.2.0"
 }
 
 async fn chain_info(State(state): State<Arc<AppState>>) -> Json<ChainInfo> {
@@ -78,7 +85,11 @@ struct BlockResponse {
     difficulty: u64,
     nonce: u64,
     tx_count: usize,
+    commitment_root: String,
+    nullifier_root: String,
     transactions: Vec<String>,
+    coinbase_reward: u64,
+    total_fees: u64,
 }
 
 async fn get_block(
@@ -98,16 +109,7 @@ async fn get_block(
         .find(|h| chain.get_block_by_height(*h).map(|b| b.hash()) == Some(hash_bytes))
         .unwrap_or(0);
 
-    Ok(Json(BlockResponse {
-        hash: hex::encode(block.hash()),
-        height,
-        prev_hash: hex::encode(block.header.prev_hash),
-        timestamp: block.header.timestamp,
-        difficulty: block.header.difficulty,
-        nonce: block.header.nonce,
-        tx_count: block.transactions.len(),
-        transactions: block.transactions.iter().map(|tx| tx.hash_hex()).collect(),
-    }))
+    Ok(Json(block_to_response(block, height)))
 }
 
 async fn get_block_by_height(
@@ -119,7 +121,11 @@ async fn get_block_by_height(
         .get_block_by_height(height)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(Json(BlockResponse {
+    Ok(Json(block_to_response(block, height)))
+}
+
+fn block_to_response(block: &ShieldedBlock, height: u64) -> BlockResponse {
+    BlockResponse {
         hash: hex::encode(block.hash()),
         height,
         prev_hash: hex::encode(block.header.prev_hash),
@@ -127,67 +133,21 @@ async fn get_block_by_height(
         difficulty: block.header.difficulty,
         nonce: block.header.nonce,
         tx_count: block.transactions.len(),
-        transactions: block.transactions.iter().map(|tx| tx.hash_hex()).collect(),
-    }))
+        commitment_root: hex::encode(block.header.commitment_root),
+        nullifier_root: hex::encode(block.header.nullifier_root),
+        transactions: block.transactions.iter().map(|tx| hex::encode(tx.hash())).collect(),
+        coinbase_reward: block.coinbase.reward,
+        total_fees: block.total_fees(),
+    }
 }
 
-#[derive(Serialize)]
-struct AccountResponse {
-    address: String,
-    balance: u64,
-    nonce: u64,
-}
-
-async fn get_account(
-    State(state): State<Arc<AppState>>,
-    Path(address): Path<String>,
-) -> Result<Json<AccountResponse>, StatusCode> {
-    let addr = Address::from_hex(&address).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    let chain = state.blockchain.read().unwrap();
-    let account = chain.state().get_account(&addr);
-
-    Ok(Json(AccountResponse {
-        address: addr.to_hex(),
-        balance: account.balance,
-        nonce: account.nonce,
-    }))
-}
-
-#[derive(Serialize)]
-struct TopHolderResponse {
-    address: String,
-    balance: u64,
-    nonce: u64,
-}
-
-async fn get_top_holders(
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<TopHolderResponse>> {
-    let chain = state.blockchain.read().unwrap();
-    let holders: Vec<TopHolderResponse> = chain
-        .state()
-        .top_holders(10)
-        .into_iter()
-        .map(|acc| TopHolderResponse {
-            address: acc.address.to_hex(),
-            balance: acc.balance,
-            nonce: acc.nonce,
-        })
-        .collect();
-
-    Json(holders)
-}
-
+/// Shielded transaction response - only public data is exposed.
 #[derive(Serialize)]
 struct TransactionResponse {
     hash: String,
-    from: String,
-    to: String,
-    amount: u64,
     fee: u64,
-    nonce: u64,
-    is_coinbase: bool,
+    spend_count: usize,
+    output_count: usize,
     status: String,
     block_height: Option<u64>,
 }
@@ -206,13 +166,10 @@ async fn get_transaction(
         let mempool = state.mempool.read().unwrap();
         if let Some(tx) = mempool.get(&hash_bytes) {
             return Ok(Json(TransactionResponse {
-                hash: tx.hash_hex(),
-                from: tx.from.to_hex(),
-                to: tx.to.to_hex(),
-                amount: tx.amount,
+                hash: hex::encode(tx.hash()),
                 fee: tx.fee,
-                nonce: tx.nonce,
-                is_coinbase: tx.is_coinbase(),
+                spend_count: tx.spends.len(),
+                output_count: tx.outputs.len(),
                 status: "pending".to_string(),
                 block_height: None,
             }));
@@ -226,13 +183,10 @@ async fn get_transaction(
             for tx in &block.transactions {
                 if tx.hash() == hash_bytes {
                     return Ok(Json(TransactionResponse {
-                        hash: tx.hash_hex(),
-                        from: tx.from.to_hex(),
-                        to: tx.to.to_hex(),
-                        amount: tx.amount,
+                        hash: hex::encode(tx.hash()),
                         fee: tx.fee,
-                        nonce: tx.nonce,
-                        is_coinbase: tx.is_coinbase(),
+                        spend_count: tx.spends.len(),
+                        output_count: tx.outputs.len(),
                         status: "confirmed".to_string(),
                         block_height: Some(h),
                     }));
@@ -254,13 +208,10 @@ async fn get_recent_transactions(
         let mempool = state.mempool.read().unwrap();
         for tx in mempool.get_transactions(10) {
             transactions.push(TransactionResponse {
-                hash: tx.hash_hex(),
-                from: tx.from.to_hex(),
-                to: tx.to.to_hex(),
-                amount: tx.amount,
+                hash: hex::encode(tx.hash()),
                 fee: tx.fee,
-                nonce: tx.nonce,
-                is_coinbase: tx.is_coinbase(),
+                spend_count: tx.spends.len(),
+                output_count: tx.outputs.len(),
                 status: "pending".to_string(),
                 block_height: None,
             });
@@ -275,13 +226,10 @@ async fn get_recent_transactions(
         if let Some(block) = chain.get_block_by_height(h) {
             for tx in &block.transactions {
                 transactions.push(TransactionResponse {
-                    hash: tx.hash_hex(),
-                    from: tx.from.to_hex(),
-                    to: tx.to.to_hex(),
-                    amount: tx.amount,
+                    hash: hex::encode(tx.hash()),
                     fee: tx.fee,
-                    nonce: tx.nonce,
-                    is_coinbase: tx.is_coinbase(),
+                    spend_count: tx.spends.len(),
+                    output_count: tx.outputs.len(),
                     status: "confirmed".to_string(),
                     block_height: Some(h),
                 });
@@ -296,72 +244,9 @@ async fn get_recent_transactions(
     Json(transactions)
 }
 
-async fn get_transactions_by_address(
-    State(state): State<Arc<AppState>>,
-    Path(address): Path<String>,
-) -> Json<Vec<TransactionResponse>> {
-    let mut transactions = Vec::new();
-
-    // Parse the address
-    let target_address = address.to_lowercase();
-
-    // Get pending transactions from mempool
-    {
-        let mempool = state.mempool.read().unwrap();
-        for tx in mempool.get_transactions(100) {
-            let from = tx.from.to_hex();
-            let to = tx.to.to_hex();
-            if from == target_address || to == target_address {
-                transactions.push(TransactionResponse {
-                    hash: tx.hash_hex(),
-                    from,
-                    to,
-                    amount: tx.amount,
-                    fee: tx.fee,
-                    nonce: tx.nonce,
-                    is_coinbase: tx.is_coinbase(),
-                    status: "pending".to_string(),
-                    block_height: None,
-                });
-            }
-        }
-    }
-
-    // Get confirmed transactions from blockchain
-    let chain = state.blockchain.read().unwrap();
-
-    for h in (0..=chain.height()).rev() {
-        if let Some(block) = chain.get_block_by_height(h) {
-            for tx in &block.transactions {
-                let from = tx.from.to_hex();
-                let to = tx.to.to_hex();
-                if from == target_address || to == target_address {
-                    transactions.push(TransactionResponse {
-                        hash: tx.hash_hex(),
-                        from,
-                        to,
-                        amount: tx.amount,
-                        fee: tx.fee,
-                        nonce: tx.nonce,
-                        is_coinbase: tx.is_coinbase(),
-                        status: "confirmed".to_string(),
-                        block_height: Some(h),
-                    });
-                }
-            }
-        }
-
-        if transactions.len() >= 50 {
-            break;
-        }
-    }
-
-    Json(transactions)
-}
-
 #[derive(Deserialize)]
 struct SubmitTxRequest {
-    transaction: Transaction,
+    transaction: ShieldedTransaction,
 }
 
 #[derive(Serialize)]
@@ -375,15 +260,31 @@ async fn submit_transaction(
     Json(req): Json<SubmitTxRequest>,
 ) -> Result<Json<SubmitTxResponse>, (StatusCode, String)> {
     let tx = req.transaction;
-    let hash = tx.hash_hex();
+    let hash = hex::encode(tx.hash());
 
     // Validate transaction
     {
         let chain = state.blockchain.read().unwrap();
-        chain
-            .state()
-            .validate_transaction(&tx)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        if let Some(params) = chain.verifying_params() {
+            // Full validation with proof verification
+            chain
+                .state()
+                .validate_transaction(&tx, params)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        } else {
+            // Basic validation (no proof verification) - for development/testing
+            // This still checks anchors, nullifiers, and signatures
+            chain
+                .state()
+                .validate_transaction_basic(&tx)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+            // Verify spend signatures manually since basic validation skips them
+            for spend in &tx.spends {
+                spend.verify_signature()
+                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid spend signature".to_string()))?;
+            }
+        }
     }
 
     // Add to mempool
@@ -395,7 +296,7 @@ async fn submit_transaction(
     if !added {
         return Err((
             StatusCode::CONFLICT,
-            "Transaction already in mempool".to_string(),
+            "Transaction already in mempool or conflicts with pending".to_string(),
         ));
     }
 
@@ -418,6 +319,7 @@ async fn submit_transaction(
 struct MempoolResponse {
     count: usize,
     transactions: Vec<String>,
+    total_fees: u64,
 }
 
 async fn get_mempool(State(state): State<Arc<AppState>>) -> Json<MempoolResponse> {
@@ -426,7 +328,8 @@ async fn get_mempool(State(state): State<Arc<AppState>>) -> Json<MempoolResponse
 
     Json(MempoolResponse {
         count: mempool.len(),
-        transactions: txs.iter().map(|tx| tx.hash_hex()).collect(),
+        transactions: txs.iter().map(|tx| hex::encode(tx.hash())).collect(),
+        total_fees: mempool.total_fees(),
     })
 }
 
@@ -435,29 +338,44 @@ async fn get_mempool(State(state): State<Arc<AppState>>) -> Json<MempoolResponse
 /// Receive a block from a peer node.
 async fn receive_block(
     State(state): State<Arc<AppState>>,
-    Json(block): Json<Block>,
+    Json(block): Json<ShieldedBlock>,
 ) -> Result<Json<ReceiveBlockResponse>, (StatusCode, String)> {
     let block_hash = block.hash_hex();
 
     info!("Received block {} from peer", &block_hash[..16]);
 
-    // Try to add the block (handles orphans and forks)
+    // Try to add the block (handles forks and reorgs automatically)
     let (accepted, status) = {
         let mut chain = state.blockchain.write().unwrap();
+        let old_height = chain.height();
+        let old_tip = chain.latest_hash();
+
         match chain.try_add_block(block.clone()) {
             Ok(true) => {
-                info!("Added block {} to chain (height: {})", &block_hash[..16], chain.height());
+                let new_height = chain.height();
+                let reorged = old_tip != chain.get_block_by_height(old_height.min(new_height - 1))
+                    .map(|b| b.hash())
+                    .unwrap_or([0u8; 32]);
+
+                if reorged {
+                    info!("Chain reorganization! New tip: {} (height: {})", &block_hash[..16], new_height);
+                } else {
+                    info!("Added block {} to chain (height: {})", &block_hash[..16], new_height);
+                }
 
                 // Remove confirmed transactions from mempool
                 let tx_hashes: Vec<[u8; 32]> = block
                     .transactions
                     .iter()
-                    .skip(1) // Skip coinbase
                     .map(|tx| tx.hash())
                     .collect();
 
                 let mut mempool = state.mempool.write().unwrap();
                 mempool.remove_confirmed(&tx_hashes);
+
+                // Remove transactions with now-spent nullifiers
+                let nullifiers: Vec<_> = block.nullifiers();
+                mempool.remove_spent_nullifiers(&nullifiers);
 
                 // Re-validate remaining mempool transactions
                 let removed = mempool.revalidate(chain.state());
@@ -468,14 +386,9 @@ async fn receive_block(
                 (true, "accepted")
             }
             Ok(false) => {
-                // Block stored as orphan or already known
-                let orphans = chain.orphan_count();
-                if orphans > 0 {
-                    info!("Block {} stored as orphan (total orphans: {})", &block_hash[..16], orphans);
-                    (false, "orphan")
-                } else {
-                    (false, "duplicate")
-                }
+                // Block was duplicate or stored as side chain
+                info!("Block {} stored (orphan or side chain)", &block_hash[..16]);
+                (false, "stored")
             }
             Err(e) => {
                 warn!("Block {} rejected: {}", &block_hash[..16], e);
@@ -484,7 +397,7 @@ async fn receive_block(
         }
     };
 
-    // Relay to other peers (gossip protocol) if accepted to main chain
+    // Relay to other peers (gossip protocol) if accepted
     if accepted {
         let peers = state.peers.read().unwrap().clone();
         if !peers.is_empty() {
@@ -511,7 +424,7 @@ struct ReceiveBlockResponse {
 async fn get_blocks_since(
     State(state): State<Arc<AppState>>,
     Path(since_height): Path<u64>,
-) -> Json<Vec<Block>> {
+) -> Json<Vec<ShieldedBlock>> {
     let chain = state.blockchain.read().unwrap();
     let current_height = chain.height();
 
@@ -579,9 +492,9 @@ async fn add_peer(
 /// Receive a transaction from a peer (relay endpoint).
 async fn receive_transaction(
     State(state): State<Arc<AppState>>,
-    Json(tx): Json<Transaction>,
+    Json(tx): Json<ShieldedTransaction>,
 ) -> Result<Json<SubmitTxResponse>, (StatusCode, String)> {
-    let hash = tx.hash_hex();
+    let hash = hex::encode(tx.hash());
 
     // Check if already in mempool
     {
@@ -597,10 +510,22 @@ async fn receive_transaction(
     // Validate transaction
     {
         let chain = state.blockchain.read().unwrap();
-        chain
-            .state()
-            .validate_transaction(&tx)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        if let Some(params) = chain.verifying_params() {
+            chain
+                .state()
+                .validate_transaction(&tx, params)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        } else {
+            chain
+                .state()
+                .validate_transaction_basic(&tx)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+            for spend in &tx.spends {
+                spend.verify_signature()
+                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid spend signature".to_string()))?;
+            }
+        }
     }
 
     // Add to mempool
@@ -631,7 +556,7 @@ async fn receive_transaction(
 // ============ Relay Helper Functions ============
 
 /// Relay a block to all known peers.
-async fn relay_block(block: &Block, peers: &[String]) {
+async fn relay_block(block: &ShieldedBlock, peers: &[String]) {
     let client = reqwest::Client::new();
     let block_hash = &block.hash_hex()[..16];
 
@@ -656,9 +581,9 @@ async fn relay_block(block: &Block, peers: &[String]) {
 }
 
 /// Relay a transaction to all known peers.
-async fn relay_transaction(tx: &Transaction, peers: &[String]) {
+async fn relay_transaction(tx: &ShieldedTransaction, peers: &[String]) {
     let client = reqwest::Client::new();
-    let tx_hash = &tx.hash_hex()[..16];
+    let tx_hash = &hex::encode(tx.hash())[..16];
 
     for peer in peers {
         let url = format!("{}/tx/relay", peer);
@@ -676,112 +601,235 @@ async fn relay_transaction(tx: &Transaction, peers: &[String]) {
     }
 }
 
-// ============ Wallet API ============
+// ============ Wallet Scanning Endpoints ============
 
+/// An encrypted output from a block (transaction output or coinbase).
 #[derive(Serialize)]
-struct WalletResponse {
-    address: String,
-    public_key: String,
-    secret_key: String,
+struct EncryptedOutput {
+    /// Position in the commitment tree.
+    position: u64,
+    /// Block height where this output was created.
+    block_height: u64,
+    /// The note commitment (hex).
+    note_commitment: String,
+    /// Ephemeral public key for decryption (hex).
+    ephemeral_pk: String,
+    /// Encrypted note ciphertext (hex).
+    ciphertext: String,
 }
 
-/// Generate a new wallet.
-async fn generate_wallet() -> Json<WalletResponse> {
-    let wallet = Wallet::generate();
-
-    Json(WalletResponse {
-        address: wallet.address().to_hex(),
-        public_key: hex::encode(wallet.public_key_bytes()),
-        secret_key: hex::encode(wallet.secret_key_bytes()),
-    })
-}
-
-#[derive(Deserialize)]
-struct WalletSendRequest {
-    public_key: String,
-    secret_key: String,
-    to: String,
-    amount: u64,
-    fee: u64,
-}
-
+/// Response for outputs/since/:height endpoint.
 #[derive(Serialize)]
-struct WalletSendResponse {
-    hash: String,
-    status: String,
-    from: String,
-    to: String,
-    amount: u64,
-    fee: u64,
+struct OutputsSinceResponse {
+    outputs: Vec<EncryptedOutput>,
+    current_height: u64,
+    commitment_root: String,
 }
 
-/// Sign and send a transaction using wallet keys.
-///
-/// WARNING: This endpoint receives secret keys over the network.
-/// In production, use client-side signing with WASM-compiled Dilithium.
-async fn wallet_send(
+/// Get all encrypted outputs since a given block height.
+/// Used by wallets to scan for incoming payments.
+/// If since_height is 0, returns ALL outputs including genesis.
+async fn get_outputs_since(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<WalletSendRequest>,
-) -> Result<Json<WalletSendResponse>, (StatusCode, String)> {
-    // Decode keys
-    let pk_bytes = hex::decode(&req.public_key)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid public key hex".to_string()))?;
-    let sk_bytes = hex::decode(&req.secret_key)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid secret key hex".to_string()))?;
+    Path(since_height): Path<u64>,
+) -> Json<OutputsSinceResponse> {
+    let chain = state.blockchain.read().unwrap();
+    let current_height = chain.height();
+    let commitment_root = hex::encode(chain.commitment_root());
 
-    // Reconstruct wallet from keys
-    let wallet = Wallet::from_keys(&pk_bytes, &sk_bytes)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid keys: {}", e)))?;
+    let mut outputs = Vec::new();
+    let mut position = 0u64;
 
-    // Parse recipient address
-    let to_addr = Address::from_hex(&req.to)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid recipient address".to_string()))?;
+    // Determine the starting height for collecting outputs
+    // If since_height is 0, we want ALL outputs (initial scan)
+    // Otherwise, we want outputs from since_height+1 onwards
+    let start_height = if since_height == 0 { 0 } else { since_height + 1 };
 
-    // Get current nonce
-    let nonce = {
-        let chain = state.blockchain.read().unwrap();
-        chain.nonce(&wallet.address())
-    };
-
-    // Create and sign transaction
-    let tx = wallet.create_transaction(to_addr, req.amount, req.fee, nonce);
-    let tx_hash = tx.hash_hex();
-    let from_addr = wallet.address().to_hex();
-
-    // Validate transaction
-    {
-        let chain = state.blockchain.read().unwrap();
-        chain
-            .state()
-            .validate_transaction(&tx)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid transaction: {}", e)))?;
-    }
-
-    // Add to mempool
-    {
-        let mut mempool = state.mempool.write().unwrap();
-        if !mempool.add(tx.clone()) {
-            return Err((StatusCode::CONFLICT, "Transaction already in mempool".to_string()));
+    // First, count all commitments before start_height to get starting position
+    for h in 0..start_height.min(current_height + 1) {
+        if let Some(block) = chain.get_block_by_height(h) {
+            for tx in &block.transactions {
+                position += tx.outputs.len() as u64;
+            }
+            position += 1; // coinbase
         }
     }
 
-    // Relay to peers
-    let peers = state.peers.read().unwrap().clone();
-    if !peers.is_empty() {
-        tokio::spawn(async move {
-            relay_transaction(&tx, &peers).await;
-        });
+    // Now collect outputs from start_height onwards
+    for h in start_height..=current_height {
+        if let Some(block) = chain.get_block_by_height(h) {
+            // Transaction outputs
+            for tx in &block.transactions {
+                for output in &tx.outputs {
+                    outputs.push(EncryptedOutput {
+                        position,
+                        block_height: h,
+                        note_commitment: hex::encode(output.note_commitment.to_bytes()),
+                        ephemeral_pk: hex::encode(&output.encrypted_note.ephemeral_pk),
+                        ciphertext: hex::encode(&output.encrypted_note.ciphertext),
+                    });
+                    position += 1;
+                }
+            }
+
+            // Coinbase output
+            outputs.push(EncryptedOutput {
+                position,
+                block_height: h,
+                note_commitment: hex::encode(block.coinbase.note_commitment.to_bytes()),
+                ephemeral_pk: hex::encode(&block.coinbase.encrypted_note.ephemeral_pk),
+                ciphertext: hex::encode(&block.coinbase.encrypted_note.ciphertext),
+            });
+            position += 1;
+        }
     }
 
-    info!("Wallet {} sent {} to {}", &from_addr[..12], req.amount, &req.to[..12]);
+    Json(OutputsSinceResponse {
+        outputs,
+        current_height,
+        commitment_root,
+    })
+}
 
-    Ok(Json(WalletSendResponse {
-        hash: tx_hash,
-        status: "pending".to_string(),
-        from: from_addr,
-        to: req.to,
-        amount: req.amount,
-        fee: req.fee,
+/// Request for checking nullifiers.
+#[derive(Deserialize)]
+struct CheckNullifiersRequest {
+    nullifiers: Vec<String>,
+}
+
+/// Response for nullifier checking.
+#[derive(Serialize)]
+struct CheckNullifiersResponse {
+    /// List of nullifiers that are spent (exist in nullifier set).
+    spent: Vec<String>,
+}
+
+/// Check which nullifiers are spent.
+/// Used by wallets to determine which of their notes have been consumed.
+async fn check_nullifiers(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CheckNullifiersRequest>,
+) -> Json<CheckNullifiersResponse> {
+    let chain = state.blockchain.read().unwrap();
+    let nullifier_set = chain.state().nullifier_set();
+
+    let mut spent = Vec::new();
+
+    for nf_hex in &req.nullifiers {
+        if let Ok(nf_bytes) = hex::decode(nf_hex) {
+            if nf_bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&nf_bytes);
+                let nullifier = Nullifier::from_bytes(arr);
+
+                if nullifier_set.contains(&nullifier) {
+                    spent.push(nf_hex.clone());
+                }
+            }
+        }
+    }
+
+    Json(CheckNullifiersResponse { spent })
+}
+
+/// Response for witness endpoint.
+#[derive(Serialize)]
+struct WitnessResponse {
+    /// The current commitment tree root (hex).
+    root: String,
+    /// The Merkle path (sibling hashes from leaf to root, hex encoded).
+    path: Vec<String>,
+    /// Position in the tree.
+    position: u64,
+}
+
+/// Get a Merkle witness for a commitment.
+/// Used when creating spend proofs.
+async fn get_witness(
+    State(state): State<Arc<AppState>>,
+    Path(commitment_hex): Path<String>,
+) -> Result<Json<WitnessResponse>, StatusCode> {
+    let commitment_bytes: [u8; 32] = hex::decode(&commitment_hex)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let chain = state.blockchain.read().unwrap();
+    let commitment_tree = chain.state().commitment_tree();
+
+    // Find the position of this commitment in the tree
+    // We need to search through all positions
+    let tree_size = commitment_tree.size();
+    let mut found_position: Option<u64> = None;
+
+    for pos in 0..tree_size {
+        if let Some(cm) = commitment_tree.get_commitment(pos) {
+            if cm.to_bytes() == commitment_bytes {
+                found_position = Some(pos);
+                break;
+            }
+        }
+    }
+
+    let position = found_position.ok_or(StatusCode::NOT_FOUND)?;
+
+    let merkle_path = commitment_tree.get_path(position)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let root = commitment_tree.root();
+
+    Ok(Json(WitnessResponse {
+        root: hex::encode(root),
+        path: merkle_path.auth_path.iter().map(|h| hex::encode(h)).collect(),
+        position,
+    }))
+}
+
+/// Get witness by position (simpler than searching by commitment).
+async fn get_witness_by_position(
+    State(state): State<Arc<AppState>>,
+    Path(position): Path<u64>,
+) -> Result<Json<WitnessResponse>, StatusCode> {
+    let chain = state.blockchain.read().unwrap();
+    let commitment_tree = chain.state().commitment_tree();
+
+    let commitment = commitment_tree.get_commitment(position)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let merkle_path = commitment_tree.get_path(position)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let root = commitment_tree.root();
+
+    Ok(Json(WitnessResponse {
+        root: hex::encode(root),
+        path: merkle_path.auth_path.iter().map(|h| hex::encode(h)).collect(),
+        position,
+    }))
+}
+
+/// Debug endpoint to list all commitments in the tree.
+async fn debug_list_commitments(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let chain = state.blockchain.read().unwrap();
+    let commitment_tree = chain.state().commitment_tree();
+    let tree_size = commitment_tree.size();
+
+    let mut commitments = Vec::new();
+    for pos in 0..tree_size.min(100) { // Limit to first 100
+        if let Some(cm) = commitment_tree.get_commitment(pos) {
+            commitments.push(serde_json::json!({
+                "position": pos,
+                "commitment": hex::encode(cm.to_bytes())
+            }));
+        }
+    }
+
+    Json(serde_json::json!({
+        "tree_size": tree_size,
+        "root": hex::encode(commitment_tree.root()),
+        "commitments": commitments
     }))
 }
 

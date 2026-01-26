@@ -34,7 +34,18 @@
       "Bash(lsof:*)",
       "Bash(kill:*)",
       "Bash(xargs ls:*)",
-      "Bash(~/.fly/bin/fly deploy:*)"
+      "Bash(~/.fly/bin/fly deploy:*)",
+      "Bash(~/.fly/bin/fly status:*)",
+      "Bash(~/.fly/bin/fly machines list:*)",
+      "Bash(xargs kill -9)",
+      "Bash(fly status:*)",
+      "Bash(~/.fly/bin/flyctl version:*)",
+      "Bash(/opt/homebrew/bin/flyctl version)",
+      "Bash(~/.fly/bin/flyctl deploy:*)",
+      "Bash(~/.fly/bin/flyctl ssh console -C \"rm -rf /app/data/*\")",
+      "Bash(~/.fly/bin/flyctl logs:*)",
+      "Bash(find:*)",
+      "Bash(cargo search:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

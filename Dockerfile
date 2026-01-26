@@ -49,6 +49,9 @@ COPY --from=builder /app/target/release/postera /app/postera
 # Copy built static files from frontend stage
 COPY --from=frontend-builder /app/static ./static
 
+# Copy wallet file for mining
+COPY wallet.json ./wallet.json
+
 # Create data directory
 RUN mkdir -p /app/data
 
@@ -61,7 +64,5 @@ ENV RUST_LOG=info
 ENV POSTERA_DATA_DIR=/app/data
 ENV POSTERA_PORT=8080
 
-# Run the node - uses environment variables for configuration
-# Set POSTERA_SEEDS for peer nodes (comma-separated URLs)
-# Set POSTERA_MINE_ADDRESS to enable mining
-CMD ["/app/postera", "node"]
+# Run the node with mining enabled
+CMD ["/app/postera", "node", "--mine", "/app/wallet.json"]
