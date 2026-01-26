@@ -1,5 +1,8 @@
 # Wallets
 wallet.json
+wallet2.json
+my-wallet.json
+shielded-wallet.json
 *.wallet
 wallets/
 my-wallet
