@@ -385,3 +385,23 @@ label {
   background: var(--bg-primary);
   font-size: 0.75rem;
 }
+
+.balance.shielded {
+  color: var(--accent-purple);
+  background: none;
+  -webkit-background-clip: unset;
+  -webkit-text-fill-color: unset;
+  font-size: 2rem;
+}
+
+.shielded-note {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-style: italic;
+  margin-bottom: 16px;
+}
+
+.form-group.disabled input {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

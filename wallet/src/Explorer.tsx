@@ -5,7 +5,8 @@ import './Explorer.css';
 interface ChainInfo {
   height: number;
   difficulty: number;
-  total_accounts: number;
+  commitment_count: number;
+  nullifier_count: number;
 }
 
 interface Block {
@@ -17,18 +18,11 @@ interface Block {
 
 interface Transaction {
   hash: string;
-  from: string;
-  to: string;
-  amount: number;
-  is_coinbase: boolean;
+  fee: number;
+  spend_count: number;
+  output_count: number;
   status: 'pending' | 'confirmed';
   block_height: number | null;
-}
-
-interface Holder {
-  address: string;
-  balance: number;
-  nonce: number;
 }
 
 const COIN = 1_000_000_000;
@@ -41,7 +35,6 @@ export default function Explorer() {
   const [chainInfo, setChainInfo] = useState<ChainInfo | null>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [holders, setHolders] = useState<Holder[]>([]);
   const [mempoolCount, setMempoolCount] = useState(0);
   const [search, setSearch] = useState('');
 
@@ -67,15 +60,10 @@ export default function Explorer() {
       }
       setBlocks(fetchedBlocks);
 
-      // Fetch recent transactions
+      // Fetch recent transactions (privacy-preserving: only shows fees, not amounts)
       const txRes = await fetch('/transactions/recent');
       const txs: Transaction[] = await txRes.json();
       setTransactions(txs);
-
-      // Fetch top holders
-      const holdersRes = await fetch('/accounts/top');
-      const h: Holder[] = await holdersRes.json();
-      setHolders(h);
     } catch (e) {
       console.error('Failed to fetch data:', e);
     }
@@ -128,8 +116,12 @@ export default function Explorer() {
             <div className="stat-label">Difficulty</div>
           </div>
           <div className="stat">
-            <div className="stat-value">{chainInfo?.total_accounts ?? '-'}</div>
-            <div className="stat-label">Accounts</div>
+            <div className="stat-value">{chainInfo?.commitment_count ?? '-'}</div>
+            <div className="stat-label">Commitments</div>
+          </div>
+          <div className="stat">
+            <div className="stat-value">{chainInfo?.nullifier_count ?? '-'}</div>
+            <div className="stat-label">Nullifiers</div>
           </div>
           <div className="stat">
             <div className="stat-value">{mempoolCount}</div>
@@ -167,14 +159,15 @@ export default function Explorer() {
       </div>
 
       <h2>Recent Transactions</h2>
+      <p className="privacy-note">Transaction amounts and addresses are private. Only fees are visible.</p>
       <div className="card">
         <table>
           <thead>
             <tr>
               <th>Hash</th>
-              <th>From</th>
-              <th>To</th>
-              <th>Amount</th>
+              <th>Spends</th>
+              <th>Outputs</th>
+              <th>Fee</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -185,9 +178,9 @@ export default function Explorer() {
               transactions.map((tx) => (
                 <tr key={tx.hash}>
                   <td className="hash">{tx.hash.substring(0, 16)}...</td>
-                  <td className="hash">{tx.is_coinbase ? 'Coinbase' : tx.from.substring(0, 12) + '...'}</td>
-                  <td className="hash">{tx.to.substring(0, 12)}...</td>
-                  <td>{formatAmount(tx.amount)} coins</td>
+                  <td>{tx.spend_count}</td>
+                  <td>{tx.output_count}</td>
+                  <td>{formatAmount(tx.fee)} PSTR</td>
                   <td>
                     <span className={`badge ${tx.status}`}>
                       {tx.status}{tx.block_height !== null ? ` #${tx.block_height}` : ''}
@@ -200,32 +193,15 @@ export default function Explorer() {
         </table>
       </div>
 
-      <h2>Top Holders</h2>
-      <div className="card">
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Address</th>
-              <th>Balance</th>
-              <th>Transactions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {holders.length === 0 ? (
-              <tr><td colSpan={4} className="loading">No accounts yet</td></tr>
-            ) : (
-              holders.map((h, i) => (
-                <tr key={h.address}>
-                  <td>{i + 1}</td>
-                  <td className="hash">{h.address}</td>
-                  <td>{formatAmount(h.balance)} coins</td>
-                  <td>{h.nonce}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+      <div className="card info-card">
+        <h3>Privacy Notice</h3>
+        <p>
+          This is a shielded blockchain. Account balances, transaction amounts, and
+          sender/receiver addresses are encrypted and not visible on-chain.
+        </p>
+        <p>
+          Only you can see your balance by decrypting your notes with your private key.
+        </p>
       </div>
     </div>
   );

@@ -1,13 +1,16 @@
 # Postera
 
-A cryptocurrency using post-quantum cryptography (CRYSTALS-Dilithium signatures) to provide resistance against quantum computer attacks.
+A privacy-focused cryptocurrency combining post-quantum cryptography with zero-knowledge proofs for quantum-resistant private transactions.
 
 ## Features
 
-- **Post-Quantum Signatures**: Uses CRYSTALS-Dilithium (Dilithium3), a lattice-based signature scheme selected by NIST for post-quantum standardization
+- **Post-Quantum Signatures**: Uses ML-DSA-65 (FIPS 204, formerly CRYSTALS-Dilithium), a lattice-based signature scheme standardized by NIST
+- **Shielded Transactions**: Privacy by default using zk-SNARKs (Groth16 on BLS12-381)
+- **Note-Based Model**: UTXO-style notes with commitments, nullifiers, and encrypted payloads (similar to Zcash)
+- **Viewing Keys**: Scan the blockchain for incoming transactions without spending ability
 - **Proof of Work Consensus**: Dynamic difficulty adjustment targeting 10-second block times
 - **Full Node**: Run a node with REST API and web explorer
-- **Wallet Management**: Generate and manage quantum-resistant wallets
+- **Web Wallet**: React-based wallet with client-side key generation and message signing
 - **P2P Networking**: Peer discovery, block broadcasting, and transaction relay
 - **Persistent Storage**: SledDB-backed blockchain persistence
 - **Docker & Fly.io Deployment**: Production-ready containerization and cloud deployment
@@ -37,11 +40,16 @@ This starts 3 nodes locally (ports 8333, 8334, 8335) with Node1 mining enabled.
 
 ## Usage
 
-### Generate a Wallet
+### Generate a Shielded Wallet
 
 ```bash
 ./target/release/postera new-wallet -o my-wallet.json
 ```
+
+This generates a wallet with:
+- ML-DSA-65 keypair (post-quantum signatures)
+- Nullifier key (for deriving nullifiers when spending)
+- Viewing key (for scanning incoming notes)
 
 ### Run a Node
 
@@ -60,16 +68,36 @@ The node exposes:
 - REST API at `http://localhost:8333`
 - Block Explorer at `http://localhost:8333/explorer`
 
-### Check Balance
+### Web Wallet
+
+Run the React wallet application:
 
 ```bash
-./target/release/postera balance <address>
+cd wallet
+npm install
+npm run dev
 ```
 
-### Send Transaction
+The wallet provides:
+- Client-side ML-DSA-65 key generation (keys never leave your browser)
+- Wallet import/export
+- Message signing with quantum-resistant signatures
+- Block explorer integration
+
+### Check Balance
+
+With shielded transactions, balances are computed by scanning the blockchain for notes encrypted to your viewing key:
 
 ```bash
-./target/release/postera send <recipient-address> <amount> -w my-wallet.json
+./target/release/postera balance -w my-wallet.json
+```
+
+### Send Transaction (Coming Soon)
+
+Shielded transactions require ZK proof generation. CLI support in development:
+
+```bash
+./target/release/postera send <recipient-pk-hash> <amount> -w my-wallet.json
 ```
 
 ### Standalone Mining
@@ -108,12 +136,32 @@ The node exposes:
 
 ```
 src/
-  crypto/     Post-quantum cryptography (Dilithium keys, signatures, addresses)
-  core/       Blockchain primitives (blocks, transactions, state)
-  consensus/  Proof of work mining with dynamic difficulty
-  network/    REST API, P2P sync, and peer discovery
-  wallet/     Wallet generation and transaction signing
-  explorer/   Web-based block explorer
+  crypto/           Cryptographic primitives
+    keys.rs         ML-DSA-65 keypair generation
+    signature.rs    Post-quantum signatures
+    commitment.rs   Pedersen commitments for notes and values
+    nullifier.rs    Nullifier derivation (prevents double-spending)
+    note.rs         Note encryption/decryption with viewing keys
+    merkle_tree.rs  Commitment tree for membership proofs
+    proof.rs        zk-SNARK proof generation and verification
+    setup.rs        Trusted setup parameters (Groth16)
+    circuits/       R1CS circuits for spend and output proofs
+  core/             Blockchain primitives
+    block.rs        Block structure with shielded transactions
+    transaction.rs  Shielded transactions (spends, outputs, binding sig)
+    blockchain.rs   Chain validation and state management
+    state.rs        Nullifier set and commitment tree state
+  consensus/        Proof of work mining with dynamic difficulty
+  network/          REST API, P2P sync, and peer discovery
+  storage/          SledDB persistence
+  wallet/           Wallet generation and shielded transaction building
+  explorer/         Web-based block explorer
+
+wallet/             React web wallet application
+  src/
+    crypto.ts       Client-side ML-DSA-65 key generation and signing
+    Wallet.tsx      Wallet UI (create, import, sign messages)
+    Explorer.tsx    Block explorer UI
 ```
 
 ## Network Details
@@ -144,7 +192,9 @@ Configuration:
 
 ## Cryptography
 
-Postera uses CRYSTALS-Dilithium (Dilithium3) for all digital signatures:
+### Post-Quantum Signatures (ML-DSA-65)
+
+Postera uses ML-DSA-65 (FIPS 204), the NIST-standardized version of CRYSTALS-Dilithium:
 
 | Parameter | Size |
 |-----------|------|
@@ -152,7 +202,36 @@ Postera uses CRYSTALS-Dilithium (Dilithium3) for all digital signatures:
 | Secret Key | 4,032 bytes |
 | Signature | 3,309 bytes |
 
-Addresses are 20-byte SHA-256 hashes of public keys, similar to Ethereum's addressing scheme.
+### Zero-Knowledge Proofs (Groth16)
+
+Shielded transactions use zk-SNARKs on the BLS12-381 curve:
+
+| Component | Description |
+|-----------|-------------|
+| Proving System | Groth16 (constant-size proofs) |
+| Curve | BLS12-381 (128-bit security) |
+| Commitment Scheme | Pedersen commitments |
+| Encryption | ChaCha20-Poly1305 (note encryption) |
+
+## Privacy Model
+
+Postera implements a Zcash-style shielded transaction model:
+
+1. **Notes**: Private UTXOs containing a value and recipient's public key hash
+2. **Commitments**: Notes are represented on-chain as Pedersen commitments
+3. **Nullifiers**: Unique identifiers derived when spending a note (prevents double-spending)
+4. **Encrypted Notes**: Note data is encrypted so only the recipient can decrypt
+5. **Viewing Keys**: Derived keys that allow scanning for incoming notes without spending ability
+6. **Binding Signatures**: Prove value balance (inputs = outputs + fee) without revealing amounts
+
+### What's Public vs Private
+
+| Public | Private |
+|--------|---------|
+| Transaction fee | Sender identity |
+| Note commitments | Recipient identity |
+| Nullifiers (opaque) | Transaction amounts |
+| Block height | Note contents |
 
 ## License
 

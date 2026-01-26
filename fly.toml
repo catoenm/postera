@@ -12,6 +12,7 @@ primary_region = 'sjc'
   POSTERA_DATA_DIR = '/app/data'
   POSTERA_PORT = '8080'
   RUST_LOG = 'info'
+  POSTERA_MINE_ADDRESS = '70003826b86e7cab0f58ceab3641f563575aebc4'
 
 [[mounts]]
   source = 'postera_data'

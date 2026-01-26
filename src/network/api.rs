@@ -323,12 +323,24 @@ async fn receive_block(
 
     info!("Received block {} from peer", &block_hash[..16]);
 
-    // Try to add the block
+    // Try to add the block (handles forks and reorgs automatically)
     let (accepted, status) = {
         let mut chain = state.blockchain.write().unwrap();
-        match chain.add_block(block.clone()) {
-            Ok(()) => {
-                info!("Added block {} to chain (height: {})", &block_hash[..16], chain.height());
+        let old_height = chain.height();
+        let old_tip = chain.latest_hash();
+
+        match chain.try_add_block(block.clone()) {
+            Ok(true) => {
+                let new_height = chain.height();
+                let reorged = old_tip != chain.get_block_by_height(old_height.min(new_height - 1))
+                    .map(|b| b.hash())
+                    .unwrap_or([0u8; 32]);
+
+                if reorged {
+                    info!("Chain reorganization! New tip: {} (height: {})", &block_hash[..16], new_height);
+                } else {
+                    info!("Added block {} to chain (height: {})", &block_hash[..16], new_height);
+                }
 
                 // Remove confirmed transactions from mempool
                 let tx_hashes: Vec<[u8; 32]> = block
@@ -351,6 +363,11 @@ async fn receive_block(
                 }
 
                 (true, "accepted")
+            }
+            Ok(false) => {
+                // Block was duplicate or stored as side chain
+                info!("Block {} stored (orphan or side chain)", &block_hash[..16]);
+                (false, "stored")
             }
             Err(e) => {
                 warn!("Block {} rejected: {}", &block_hash[..16], e);

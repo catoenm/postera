@@ -7,6 +7,7 @@ use crate::core::ShieldedBlock;
 use super::AppState;
 
 /// Sync the local chain from a peer node.
+/// Handles both catching up and chain reorganizations.
 pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64, SyncError> {
     let client = reqwest::Client::new();
 
@@ -19,23 +20,41 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
         .json()
         .await?;
 
-    let local_height = {
+    let (local_height, local_hash) = {
         let chain = state.blockchain.read().unwrap();
-        chain.height()
+        (chain.height(), hex::encode(chain.latest_hash()))
     };
 
-    if peer_info.height <= local_height {
+    // Check if peer is ahead OR if we have a fork at the same height
+    let is_fork = peer_info.height == local_height && peer_info.latest_hash != local_hash;
+    let peer_ahead = peer_info.height > local_height;
+
+    if !peer_ahead && !is_fork {
         info!("Peer {} is not ahead (peer: {}, local: {})", peer_url, peer_info.height, local_height);
         return Ok(0);
     }
 
-    info!(
-        "Syncing from peer {} (peer height: {}, local: {})",
-        peer_url, peer_info.height, local_height
-    );
+    if is_fork {
+        info!(
+            "Fork detected with peer {} at height {} (peer: {}..., local: {}...)",
+            peer_url, peer_info.height, &peer_info.latest_hash[..16], &local_hash[..16]
+        );
+    } else {
+        info!(
+            "Syncing from peer {} (peer height: {}, local: {})",
+            peer_url, peer_info.height, local_height
+        );
+    }
 
-    // Fetch blocks we don't have
-    let blocks_url = format!("{}/blocks/since/{}", peer_url, local_height);
+    // Find common ancestor by checking recent blocks
+    let sync_from_height = if is_fork {
+        find_common_ancestor(&state, &client, peer_url, local_height).await?
+    } else {
+        local_height
+    };
+
+    // Fetch blocks from common ancestor
+    let blocks_url = format!("{}/blocks/since/{}", peer_url, sync_from_height);
     let blocks: Vec<ShieldedBlock> = client
         .get(&blocks_url)
         .send()
@@ -44,11 +63,20 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
         .await?;
 
     let mut synced = 0u64;
+    let mut reorged = false;
+
     for block in blocks {
         let mut chain = state.blockchain.write().unwrap();
-        match chain.add_block(block) {
-            Ok(()) => {
+        match chain.try_add_block(block) {
+            Ok(true) => {
                 synced += 1;
+                if is_fork && !reorged {
+                    reorged = true;
+                    info!("Chain reorganization triggered from peer {}", peer_url);
+                }
+            }
+            Ok(false) => {
+                // Block was duplicate or stored as side chain - continue
             }
             Err(e) => {
                 warn!("Failed to add block during sync: {}", e);
@@ -57,8 +85,58 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
         }
     }
 
-    info!("Synced {} blocks from {}", synced, peer_url);
+    if synced > 0 {
+        if reorged {
+            info!("Reorg complete: synced {} blocks from {} (new height: {})",
+                synced, peer_url, state.blockchain.read().unwrap().height());
+        } else {
+            info!("Synced {} blocks from {}", synced, peer_url);
+        }
+    }
     Ok(synced)
+}
+
+/// Find the common ancestor block between our chain and the peer's chain.
+/// Returns the height to sync from.
+async fn find_common_ancestor(
+    state: &Arc<AppState>,
+    client: &reqwest::Client,
+    peer_url: &str,
+    start_height: u64,
+) -> Result<u64, SyncError> {
+    // Check recent blocks to find where chains diverged
+    // Start from current height and go back until we find a matching block
+    let check_depth = 100u64.min(start_height); // Don't go back more than 100 blocks
+
+    for offset in 0..check_depth {
+        let height = start_height - offset;
+
+        // Get our block at this height
+        let local_hash = {
+            let chain = state.blockchain.read().unwrap();
+            chain.get_block_by_height(height).map(|b| hex::encode(b.hash()))
+        };
+
+        if let Some(local_hash) = local_hash {
+            // Get peer's block at this height
+            let block_url = format!("{}/block/height/{}", peer_url, height);
+            if let Ok(resp) = client.get(&block_url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(peer_block) = resp.json::<PeerBlockInfo>().await {
+                        if peer_block.hash == local_hash {
+                            info!("Found common ancestor at height {}", height);
+                            return Ok(height);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // If we can't find common ancestor in recent blocks, sync from beginning
+    // This is a safety fallback - shouldn't normally happen
+    warn!("Could not find common ancestor in last {} blocks, syncing from genesis", check_depth);
+    Ok(0)
 }
 
 /// Broadcast a newly mined block to all peers.
@@ -120,6 +198,14 @@ struct PeerChainInfo {
     latest_hash: String,
     difficulty: u64,
     commitment_count: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+struct PeerBlockInfo {
+    hash: String,
+    height: u64,
+    prev_hash: String,
 }
 
 #[derive(Debug, thiserror::Error)]
