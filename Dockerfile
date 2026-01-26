@@ -1,5 +1,20 @@
-# Build stage
-FROM rust:1.85-bookworm as builder
+# Frontend build stage
+FROM node:22-bookworm-slim AS frontend-builder
+
+WORKDIR /app/wallet
+
+# Copy package files first for better caching
+COPY wallet/package.json wallet/package-lock.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy source and build
+COPY wallet/ ./
+RUN npm run build
+
+# Rust build stage
+FROM rust:1.85-bookworm AS builder
 
 WORKDIR /app
 
@@ -31,8 +46,8 @@ WORKDIR /app
 # Copy the binary from builder
 COPY --from=builder /app/target/release/postera /app/postera
 
-# Copy static files (pre-built React app)
-COPY static ./static
+# Copy built static files from frontend stage
+COPY --from=frontend-builder /app/static ./static
 
 # Create data directory
 RUN mkdir -p /app/data
