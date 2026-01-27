@@ -2,12 +2,21 @@
  * Shielded cryptographic operations for note encryption/decryption.
  *
  * These functions match the Rust implementation exactly, using the same
- * domain separators and algorithms (BLAKE2s-256 for hashing, ChaCha20-Poly1305 for encryption).
+ * domain separators and algorithms:
+ * - Poseidon hash for note commitments and nullifiers (ZK-SNARK friendly)
+ * - BLAKE2s-256 for key derivation
+ * - ChaCha20-Poly1305 for note encryption
  */
 
 import { blake2s } from '@noble/hashes/blake2.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { hexToBytes } from './crypto';
+import {
+  noteCommitment as poseidonNoteCommitment,
+  deriveNullifier as poseidonDeriveNullifier,
+  bigintToBytes32,
+  bytes32ToBigint,
+} from './poseidon';
 
 // Note structure: 8 bytes value + 32 bytes pk_hash + 32 bytes randomness = 72 bytes
 // Ciphertext: 72 + 16 (poly1305 tag) = 88 bytes
@@ -65,46 +74,39 @@ export function deriveEncryptionKey(viewingSecret: Uint8Array, ephemeralPk: Uint
 }
 
 /**
- * Compute a note commitment.
- * cm = BLAKE2s("Postera_NoteCommitment" || value_le || pk_hash || randomness)
+ * Compute a note commitment using Poseidon hash (ZK-SNARK friendly).
+ * cm = Poseidon(DOMAIN_NOTE_COMMITMENT, value, pkHash, randomness)
  *
- * The randomness is the first 32 bytes of the Fr field element serialization.
+ * This must match the Rust and Circom implementations exactly.
  */
 export function computeNoteCommitment(value: bigint, pkHash: Uint8Array, randomness: Uint8Array): Uint8Array {
-  // Value as 8-byte little-endian
-  const valueBytes = new Uint8Array(8);
-  const view = new DataView(valueBytes.buffer);
-  view.setBigUint64(0, value, true);
+  // Convert inputs to field elements
+  const pkHashFe = bytes32ToBigint(pkHash);
+  const randomnessFe = bytes32ToBigint(randomness);
 
-  const input = new Uint8Array([
-    ...new TextEncoder().encode('Postera_NoteCommitment'),
-    ...valueBytes,
-    ...pkHash,
-    ...randomness,
-  ]);
-  return blake2s(input, { dkLen: 32 });
+  // Compute Poseidon hash
+  const commitmentFe = poseidonNoteCommitment(value, pkHashFe, randomnessFe);
+
+  // Convert back to bytes
+  return bigintToBytes32(commitmentFe);
 }
 
 /**
- * Derive a nullifier for a note.
- * nf = BLAKE2s("Postera_Nullifier" || nk_bytes || commitment || position_le)
+ * Derive a nullifier for a note using Poseidon hash (ZK-SNARK friendly).
+ * nf = Poseidon(DOMAIN_NULLIFIER, nullifierKey, commitment, position)
  *
- * Note: The Rust implementation serializes the nullifier key as an Fr field element.
- * We use the raw 32 bytes here.
+ * This must match the Rust and Circom implementations exactly.
  */
 export function deriveNullifier(nullifierKey: Uint8Array, commitment: Uint8Array, position: bigint): Uint8Array {
-  // Position as 8-byte little-endian
-  const positionBytes = new Uint8Array(8);
-  const view = new DataView(positionBytes.buffer);
-  view.setBigUint64(0, position, true);
+  // Convert inputs to field elements
+  const nullifierKeyFe = bytes32ToBigint(nullifierKey);
+  const commitmentFe = bytes32ToBigint(commitment);
 
-  const input = new Uint8Array([
-    ...new TextEncoder().encode('Postera_Nullifier'),
-    ...nullifierKey,
-    ...commitment,
-    ...positionBytes,
-  ]);
-  return blake2s(input, { dkLen: 32 });
+  // Compute Poseidon hash
+  const nullifierFe = poseidonDeriveNullifier(nullifierKeyFe, commitmentFe, position);
+
+  // Convert back to bytes
+  return bigintToBytes32(nullifierFe);
 }
 
 /**
@@ -259,3 +261,9 @@ export function generateRandomness(): Uint8Array {
 export function canDecryptNote(encrypted: EncryptedNote, viewingKey: Uint8Array): boolean {
   return decryptNote(encrypted, viewingKey) !== null;
 }
+
+/**
+ * Initialize cryptographic primitives.
+ * Must be called before using computeNoteCommitment or deriveNullifier.
+ */
+export { initPoseidon } from './poseidon';

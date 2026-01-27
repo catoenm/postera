@@ -9,18 +9,20 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
+use ark_bls12_381::Fr;
+
 use crate::core::{
-    BindingSignature, CoinbaseTransaction, OutputDescription, ShieldedBlock,
+    BindingSignature, OutputDescription, ShieldedBlock,
     ShieldedState, ShieldedTransaction, SpendDescription,
 };
 use crate::crypto::{
-    commitment::{commit_to_value, NoteCommitment, ValueCommitment},
-    merkle_tree::{CommitmentWitness, MerklePath},
-    note::{compute_pk_hash, EncryptedNote, Note, ViewingKey},
+    commitment::{commit_to_value, NoteCommitment},
+    note::{compute_pk_hash, Note, ViewingKey},
     nullifier::{derive_nullifier, Nullifier, NullifierKey},
+    poseidon::{bytes32_to_field, field_to_bytes32, poseidon_hash, DOMAIN_NULLIFIER, DOMAIN_MERKLE_NODE, DOMAIN_NOTE_COMMITMENT},
     proof::{generate_output_proof, generate_spend_proof, ProvingParams, ZkProof},
     circuits::{OutputCircuit, SpendCircuit},
-    sign, Address, KeyPair, Signature,
+    sign, Address, KeyPair,
 };
 
 /// A note owned by the wallet.
@@ -314,7 +316,7 @@ impl ShieldedWallet {
         None // Not enough funds
     }
 
-    /// Create a shielded transaction.
+    /// Create a shielded transaction with real ZK proofs.
     ///
     /// # Arguments
     /// * `state` - Current blockchain state for witness generation
@@ -346,6 +348,10 @@ impl ShieldedWallet {
 
         let mut rng = ark_std::rand::thread_rng();
 
+        // Get proving params (required for proof generation)
+        let proving_params = self.proving_params.as_ref()
+            .ok_or(WalletError::NoProvingParams)?;
+
         // Create spend descriptions
         let mut spends = Vec::new();
         for &idx in &note_indices {
@@ -358,23 +364,52 @@ impl ShieldedWallet {
 
             // Create value commitment
             let value_commitment = commit_to_value(note.note.value, &mut rng);
+            let value_commitment_hash = value_commitment.commitment_hash();
 
-            // Create spend proof (simplified - real implementation would use circuit)
-            let proof = ZkProof::from_bytes(vec![0u8; 192]); // Placeholder
+            // Compute nullifier
+            let nullifier = note.nullifier(&self.nullifier_key);
+
+            // Convert witness data to field elements for circuit
+            let merkle_root_fe = bytes32_to_field(&witness.root);
+            let nullifier_fe = bytes32_to_field(&nullifier.to_bytes());
+            let value_commitment_hash_fe = bytes32_to_field(&value_commitment_hash);
+
+            // Convert merkle path to field elements
+            let merkle_path_fe: Vec<Fr> = witness.path.auth_path
+                .iter()
+                .map(bytes32_to_field)
+                .collect();
+
+            // Create spend circuit
+            let circuit = SpendCircuit::new(
+                merkle_root_fe,
+                nullifier_fe,
+                value_commitment_hash_fe,
+                note.note.value,
+                bytes32_to_field(&note.note.recipient_pk_hash),
+                note.note.randomness,
+                self.nullifier_key.to_field_element(),
+                merkle_path_fe,
+                note.position,
+                value_commitment.randomness,
+            );
+
+            // Generate real spend proof
+            let proof = generate_spend_proof(circuit, proving_params.as_ref(), &mut rng)
+                .map_err(|_| WalletError::ProofGenerationFailed)?;
 
             // Sign the spend
-            let nullifier = note.nullifier(&self.nullifier_key);
             let mut sign_msg = Vec::new();
             sign_msg.extend_from_slice(&witness.root);
             sign_msg.extend_from_slice(nullifier.as_ref());
-            sign_msg.extend_from_slice(&value_commitment.commitment_hash());
+            sign_msg.extend_from_slice(&value_commitment_hash);
 
             let signature = sign(&sign_msg, &self.keypair);
 
             spends.push(SpendDescription {
                 anchor: witness.root,
                 nullifier,
-                value_commitment: value_commitment.commitment_hash(),
+                value_commitment: value_commitment_hash,
                 proof,
                 signature,
                 public_key: self.keypair.public_key_bytes().to_vec(),
@@ -385,21 +420,31 @@ impl ShieldedWallet {
         let mut output_descs = Vec::new();
 
         for (recipient_pk_hash, amount) in outputs {
-            let note = Note::new(amount, recipient_pk_hash, &mut rng);
-            let commitment = note.commitment();
+            let output_note = Note::new(amount, recipient_pk_hash, &mut rng);
+            let commitment = output_note.commitment();
             let value_commitment = commit_to_value(amount, &mut rng);
+            let value_commitment_hash = value_commitment.commitment_hash();
 
             // Encrypt note for recipient
-            // Note: We'd need the recipient's viewing key here
-            // For now, use our own for testing
-            let encrypted = self.viewing_key.encrypt_note(&note, &mut rng);
+            let encrypted = self.viewing_key.encrypt_note(&output_note, &mut rng);
 
-            // Create output proof (simplified)
-            let proof = ZkProof::from_bytes(vec![0u8; 192]); // Placeholder
+            // Create output circuit
+            let circuit = OutputCircuit::new(
+                bytes32_to_field(&commitment.to_bytes()),
+                bytes32_to_field(&value_commitment_hash),
+                amount,
+                bytes32_to_field(&recipient_pk_hash),
+                output_note.randomness,
+                value_commitment.randomness,
+            );
+
+            // Generate real output proof
+            let proof = generate_output_proof(circuit, proving_params.as_ref(), &mut rng)
+                .map_err(|_| WalletError::ProofGenerationFailed)?;
 
             output_descs.push(OutputDescription {
                 note_commitment: commitment,
-                value_commitment: value_commitment.commitment_hash(),
+                value_commitment: value_commitment_hash,
                 encrypted_note: encrypted,
                 proof,
             });
@@ -410,18 +455,32 @@ impl ShieldedWallet {
             let change_note = Note::new(change, self.pk_hash, &mut rng);
             let commitment = change_note.commitment();
             let value_commitment = commit_to_value(change, &mut rng);
+            let value_commitment_hash = value_commitment.commitment_hash();
             let encrypted = self.viewing_key.encrypt_note(&change_note, &mut rng);
-            let proof = ZkProof::from_bytes(vec![0u8; 192]);
+
+            // Create output circuit for change
+            let circuit = OutputCircuit::new(
+                bytes32_to_field(&commitment.to_bytes()),
+                bytes32_to_field(&value_commitment_hash),
+                change,
+                bytes32_to_field(&self.pk_hash),
+                change_note.randomness,
+                value_commitment.randomness,
+            );
+
+            // Generate proof for change output
+            let proof = generate_output_proof(circuit, proving_params.as_ref(), &mut rng)
+                .map_err(|_| WalletError::ProofGenerationFailed)?;
 
             output_descs.push(OutputDescription {
                 note_commitment: commitment,
-                value_commitment: value_commitment.commitment_hash(),
+                value_commitment: value_commitment_hash,
                 encrypted_note: encrypted,
                 proof,
             });
         }
 
-        // Create binding signature (simplified)
+        // Create binding signature (simplified - full implementation would use commitment arithmetic)
         let binding_sig = BindingSignature::new(vec![0u8; 64]);
 
         // Mark spent notes

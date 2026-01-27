@@ -16,6 +16,21 @@ interface Block {
   timestamp: number;
 }
 
+interface BlockDetail {
+  hash: string;
+  height: number;
+  prev_hash: string;
+  timestamp: number;
+  difficulty: number;
+  nonce: number;
+  tx_count: number;
+  commitment_root: string;
+  nullifier_root: string;
+  transactions: string[];
+  coinbase_reward: number;
+  total_fees: number;
+}
+
 interface Transaction {
   hash: string;
   fee: number;
@@ -24,6 +39,11 @@ interface Transaction {
   status: 'pending' | 'confirmed';
   block_height: number | null;
 }
+
+type DetailView =
+  | { type: 'none' }
+  | { type: 'block'; data: BlockDetail }
+  | { type: 'transaction'; data: Transaction }
 
 const COIN = 1_000_000_000;
 
@@ -37,6 +57,48 @@ export default function Explorer() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [mempoolCount, setMempoolCount] = useState(0);
   const [search, setSearch] = useState('');
+  const [detailView, setDetailView] = useState<DetailView>({ type: 'none' });
+  const [loading, setLoading] = useState(false);
+
+  const fetchBlockDetail = async (hash: string) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/block/${hash}`);
+      if (res.ok) {
+        const data: BlockDetail = await res.json();
+        setDetailView({ type: 'block', data });
+      }
+    } catch (e) {
+      console.error('Failed to fetch block:', e);
+    }
+    setLoading(false);
+  };
+
+  const fetchBlockByHeight = async (height: number) => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/block/height/${height}`);
+      if (res.ok) {
+        const data: BlockDetail = await res.json();
+        setDetailView({ type: 'block', data });
+      }
+    } catch (e) {
+      console.error('Failed to fetch block:', e);
+    }
+    setLoading(false);
+  };
+
+  const handleBlockClick = (block: Block) => {
+    fetchBlockDetail(block.hash);
+  };
+
+  const handleTransactionClick = (tx: Transaction) => {
+    setDetailView({ type: 'transaction', data: tx });
+  };
+
+  const closeDetail = () => {
+    setDetailView({ type: 'none' });
+  };
 
   const fetchData = useCallback(async () => {
     try {
@@ -146,7 +208,7 @@ export default function Explorer() {
               <tr><td colSpan={4} className="loading">Loading...</td></tr>
             ) : (
               blocks.map((b) => (
-                <tr key={b.hash}>
+                <tr key={b.hash} className="clickable" onClick={() => handleBlockClick(b)}>
                   <td>{b.height}</td>
                   <td className="hash">{b.hash.substring(0, 16)}...</td>
                   <td>{b.tx_count}</td>
@@ -176,7 +238,7 @@ export default function Explorer() {
               <tr><td colSpan={5} className="loading">No transactions yet</td></tr>
             ) : (
               transactions.map((tx) => (
-                <tr key={tx.hash}>
+                <tr key={tx.hash} className="clickable" onClick={() => handleTransactionClick(tx)}>
                   <td className="hash">{tx.hash.substring(0, 16)}...</td>
                   <td>{tx.spend_count}</td>
                   <td>{tx.output_count}</td>
@@ -203,6 +265,151 @@ export default function Explorer() {
           Only you can see your balance by decrypting your notes with your private key.
         </p>
       </div>
+
+      {/* Detail Modal */}
+      {detailView.type !== 'none' && (
+        <div className="modal-overlay" onClick={closeDetail}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={closeDetail}>&times;</button>
+
+            {loading ? (
+              <div className="modal-loading">Loading...</div>
+            ) : detailView.type === 'block' ? (
+              <div className="block-detail">
+                <h2>Block #{detailView.data.height}</h2>
+
+                <div className="detail-section">
+                  <h3>Overview</h3>
+                  <div className="detail-grid">
+                    <div className="detail-item">
+                      <span className="detail-label">Height</span>
+                      <span className="detail-value">{detailView.data.height}</span>
+                    </div>
+                    <div className="detail-item">
+                      <span className="detail-label">Timestamp</span>
+                      <span className="detail-value">{new Date(detailView.data.timestamp * 1000).toLocaleString()}</span>
+                    </div>
+                    <div className="detail-item">
+                      <span className="detail-label">Transactions</span>
+                      <span className="detail-value">{detailView.data.tx_count}</span>
+                    </div>
+                    <div className="detail-item">
+                      <span className="detail-label">Difficulty</span>
+                      <span className="detail-value">{detailView.data.difficulty}</span>
+                    </div>
+                    <div className="detail-item">
+                      <span className="detail-label">Nonce</span>
+                      <span className="detail-value">{detailView.data.nonce}</span>
+                    </div>
+                    <div className="detail-item">
+                      <span className="detail-label">Coinbase Reward</span>
+                      <span className="detail-value">{formatAmount(detailView.data.coinbase_reward)} PSTR</span>
+                    </div>
+                    <div className="detail-item">
+                      <span className="detail-label">Total Fees</span>
+                      <span className="detail-value">{formatAmount(detailView.data.total_fees)} PSTR</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="detail-section">
+                  <h3>Hashes</h3>
+                  <div className="hash-item">
+                    <span className="hash-label">Block Hash</span>
+                    <code className="hash-value">{detailView.data.hash}</code>
+                  </div>
+                  <div className="hash-item">
+                    <span className="hash-label">Previous Block</span>
+                    <code className="hash-value clickable-hash" onClick={() => fetchBlockDetail(detailView.data.prev_hash)}>
+                      {detailView.data.prev_hash}
+                    </code>
+                  </div>
+                  <div className="hash-item">
+                    <span className="hash-label">Commitment Root</span>
+                    <code className="hash-value">{detailView.data.commitment_root}</code>
+                  </div>
+                  <div className="hash-item">
+                    <span className="hash-label">Nullifier Root</span>
+                    <code className="hash-value">{detailView.data.nullifier_root}</code>
+                  </div>
+                </div>
+
+                {detailView.data.transactions.length > 0 && (
+                  <div className="detail-section">
+                    <h3>Transactions ({detailView.data.transactions.length})</h3>
+                    <div className="tx-list">
+                      {detailView.data.transactions.map((txHash, i) => (
+                        <div key={txHash} className="tx-list-item">
+                          <span className="tx-index">{i + 1}</span>
+                          <code className="hash-value">{txHash}</code>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : detailView.type === 'transaction' ? (
+              <div className="tx-detail">
+                <h2>Transaction Details</h2>
+
+                <div className="detail-section">
+                  <h3>Overview</h3>
+                  <div className="hash-item">
+                    <span className="hash-label">Transaction Hash</span>
+                    <code className="hash-value">{detailView.data.hash}</code>
+                  </div>
+                </div>
+
+                <div className="detail-section">
+                  <div className="detail-grid">
+                    <div className="detail-item">
+                      <span className="detail-label">Status</span>
+                      <span className={`badge ${detailView.data.status}`}>
+                        {detailView.data.status}
+                      </span>
+                    </div>
+                    {detailView.data.block_height !== null && (
+                      <div className="detail-item">
+                        <span className="detail-label">Block Height</span>
+                        <span className="detail-value clickable-link" onClick={() => fetchBlockByHeight(detailView.data.block_height!)}>
+                          #{detailView.data.block_height}
+                        </span>
+                      </div>
+                    )}
+                    <div className="detail-item">
+                      <span className="detail-label">Fee</span>
+                      <span className="detail-value">{formatAmount(detailView.data.fee)} PSTR</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="detail-section">
+                  <h3>Inputs & Outputs</h3>
+                  <div className="io-visual">
+                    <div className="io-box inputs">
+                      <div className="io-header">Spends (Inputs)</div>
+                      <div className="io-count">{detailView.data.spend_count}</div>
+                      <div className="io-desc">shielded inputs</div>
+                    </div>
+                    <div className="io-arrow">→</div>
+                    <div className="io-box outputs">
+                      <div className="io-header">Outputs</div>
+                      <div className="io-count">{detailView.data.output_count}</div>
+                      <div className="io-desc">shielded outputs</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="detail-section privacy-info">
+                  <p>
+                    Transaction amounts and addresses are encrypted. Only the fee is publicly visible.
+                  </p>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

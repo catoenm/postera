@@ -11,10 +11,15 @@ import {
   computePkHash,
   tryDecryptNoteFromHex,
   deriveNullifier,
+  initPoseidon,
 } from './shielded-crypto';
 import { hexToBytes, bytesToHex } from './crypto';
 import { getOutputsSince, checkNullifiers } from './api';
+import { loadProvingKeys, areProvingKeysLoaded } from './prover';
 import type { WalletNote, ShieldedState, EncryptedOutput } from './types';
+
+/** Whether cryptographic primitives have been initialized */
+let cryptoInitialized = false;
 
 const STORAGE_KEY = 'postera_shielded_state';
 
@@ -54,6 +59,44 @@ export class ShieldedWallet {
    */
   static fromHex(secretKeyHex: string, publicKeyHex: string): ShieldedWallet {
     return new ShieldedWallet(hexToBytes(secretKeyHex), hexToBytes(publicKeyHex));
+  }
+
+  /**
+   * Initialize cryptographic primitives required for the shielded wallet.
+   * Must be called before using note commitments, nullifiers, or creating transactions.
+   *
+   * @param loadProver - If true, also loads ZK proving keys (required for transactions)
+   * @param onProgress - Optional callback for progress updates
+   */
+  static async initialize(
+    loadProver: boolean = false,
+    onProgress?: (msg: string) => void
+  ): Promise<void> {
+    if (!cryptoInitialized) {
+      onProgress?.('Initializing Poseidon hash...');
+      await initPoseidon();
+      cryptoInitialized = true;
+    }
+
+    if (loadProver && !areProvingKeysLoaded()) {
+      onProgress?.('Loading ZK proving keys (~100-200MB)...');
+      await loadProvingKeys();
+      onProgress?.('Proving keys loaded.');
+    }
+  }
+
+  /**
+   * Check if cryptographic primitives are initialized.
+   */
+  static get isInitialized(): boolean {
+    return cryptoInitialized;
+  }
+
+  /**
+   * Check if ZK proving keys are loaded (required for creating transactions).
+   */
+  static get isProverReady(): boolean {
+    return areProvingKeysLoaded();
   }
 
   /**

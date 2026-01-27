@@ -1,7 +1,7 @@
 //! Nullifier derivation for double-spend prevention.
 //!
 //! A nullifier uniquely identifies a spent note without revealing which note was spent.
-//! nf = PRF(nullifier_key, commitment, position)
+//! nf = Poseidon(DOMAIN_NULLIFIER, nullifier_key, commitment, position)
 //!
 //! Properties:
 //! - Given nf, you cannot determine which note was spent (without the nullifier key)
@@ -15,6 +15,7 @@ use blake2::{Blake2s256, Digest};
 use serde::{Deserialize, Serialize};
 
 use super::commitment::NoteCommitment;
+use super::poseidon::{poseidon_hash, bytes32_to_field, field_to_bytes32, DOMAIN_NULLIFIER};
 
 /// A nullifier that marks a note as spent.
 /// Published on-chain to prevent double-spending.
@@ -113,9 +114,9 @@ impl<'de> Deserialize<'de> for NullifierKey {
     }
 }
 
-/// Derive a nullifier for a note.
+/// Derive a nullifier for a note using Poseidon hash.
 ///
-/// nf = BLAKE2s("Postera_Nullifier" || nk || cm || position)
+/// nf = Poseidon(DOMAIN_NULLIFIER, nk, cm, position)
 ///
 /// # Arguments
 /// * `nullifier_key` - The secret nullifier key
@@ -126,25 +127,16 @@ pub fn derive_nullifier(
     commitment: &NoteCommitment,
     position: u64,
 ) -> Nullifier {
-    let mut hasher = Blake2s256::new();
+    // Convert inputs to field elements
+    let nk_fe = nullifier_key.key;
+    let cm_fe = bytes32_to_field(&commitment.0);
+    let position_fe = Fr::from(position);
 
-    // Domain separator
-    hasher.update(b"Postera_Nullifier");
+    // Hash: Poseidon(domain, nk, cm, position)
+    let hash = poseidon_hash(DOMAIN_NULLIFIER, &[nk_fe, cm_fe, position_fe]);
 
-    // Nullifier key as field element bytes
-    let mut nk_bytes = Vec::new();
-    nullifier_key.key.serialize_compressed(&mut nk_bytes).unwrap();
-    hasher.update(&nk_bytes);
-
-    // Note commitment
-    hasher.update(&commitment.0);
-
-    // Position in tree
-    hasher.update(&position.to_le_bytes());
-
-    let hash = hasher.finalize();
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&hash);
+    // Convert field element to bytes
+    let result = field_to_bytes32(&hash);
 
     Nullifier(result)
 }

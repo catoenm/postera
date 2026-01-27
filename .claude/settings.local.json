@@ -49,7 +49,17 @@
       "Bash(git rm:*)",
       "Bash(git add:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nRemove wallet files from git tracking\n\nRemove my-wallet.json and shielded-wallet.json from version control\nand add them to .gitignore to prevent accidental commits.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
-      "Bash(git commit --no-gpg-sign -m \"$\\(cat <<''EOF''\nRemove wallet files from git tracking\n\nRemove my-wallet.json and shielded-wallet.json from version control\nand add them to .gitignore to prevent accidental commits.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+      "Bash(git commit --no-gpg-sign -m \"$\\(cat <<''EOF''\nRemove wallet files from git tracking\n\nRemove my-wallet.json and shielded-wallet.json from version control\nand add them to .gitignore to prevent accidental commits.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(fly apps list:*)",
+      "Bash(npx tsc:*)",
+      "Bash(circom:*)",
+      "Bash(cargo install:*)",
+      "Bash(npm run setup:spend:*)",
+      "Bash(npm run setup:output:*)",
+      "Bash(npm run export:spend-vkey:*)",
+      "Bash(npm run export:output-vkey:*)",
+      "Bash(grep:*)",
+      "Bash(python3:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

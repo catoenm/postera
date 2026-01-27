@@ -5,12 +5,18 @@
 //! - O(log n) proof generation for membership
 //! - O(log n) insertions
 //! - Deterministic root computation
+//!
+//! Uses Poseidon hash for efficient verification in zk-SNARK circuits.
 
-use blake2::{Blake2s256, Digest};
+use ark_bls12_381::Fr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::commitment::NoteCommitment;
+use super::poseidon::{
+    poseidon_hash, bytes32_to_field, field_to_bytes32,
+    DOMAIN_MERKLE_EMPTY, DOMAIN_MERKLE_NODE,
+};
 
 /// Tree depth (supports 2^32 notes).
 pub const TREE_DEPTH: usize = 32;
@@ -18,16 +24,14 @@ pub const TREE_DEPTH: usize = 32;
 /// A hash in the Merkle tree.
 pub type TreeHash = [u8; 32];
 
-/// Empty leaf value (hash of zeros).
+/// Empty leaf value using Poseidon hash.
 lazy_static::lazy_static! {
     static ref EMPTY_LEAVES: Vec<TreeHash> = {
         let mut leaves = Vec::with_capacity(TREE_DEPTH + 1);
 
-        // Level 0: empty leaf
-        let mut hasher = Blake2s256::new();
-        hasher.update(b"Postera_MerkleTree_Empty");
-        let mut empty_leaf = [0u8; 32];
-        empty_leaf.copy_from_slice(&hasher.finalize());
+        // Level 0: empty leaf = Poseidon(DOMAIN_MERKLE_EMPTY, 0)
+        let empty_leaf_fe = poseidon_hash(DOMAIN_MERKLE_EMPTY, &[Fr::from(0u64)]);
+        let empty_leaf = field_to_bytes32(&empty_leaf_fe);
         leaves.push(empty_leaf);
 
         // Higher levels: hash of two children
@@ -41,16 +45,13 @@ lazy_static::lazy_static! {
     };
 }
 
-/// Hash two sibling nodes to create parent.
+/// Hash two sibling nodes to create parent using Poseidon.
 fn hash_nodes(left: &TreeHash, right: &TreeHash) -> TreeHash {
-    let mut hasher = Blake2s256::new();
-    hasher.update(b"Postera_MerkleTree_Node");
-    hasher.update(left);
-    hasher.update(right);
-    let hash = hasher.finalize();
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&hash);
-    result
+    let left_fe = bytes32_to_field(left);
+    let right_fe = bytes32_to_field(right);
+
+    let hash = poseidon_hash(DOMAIN_MERKLE_NODE, &[left_fe, right_fe]);
+    field_to_bytes32(&hash)
 }
 
 /// A Merkle path proving a leaf's inclusion in the tree.

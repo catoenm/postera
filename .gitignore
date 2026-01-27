@@ -36,3 +36,9 @@ your-data/
 
 # Docker
 *.tar
+
+# ZK trusted setup (powers of tau)
+*.ptau
+*powersOfTau*
+pot*.ptau
+powersoftau/

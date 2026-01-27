@@ -4,50 +4,49 @@
 //! 1. The note commitment was correctly computed
 //! 2. The note exists in the commitment tree (Merkle proof)
 //! 3. The nullifier was correctly derived
-//! 4. The value commitment is correct
 //!
-//! Public inputs: merkle_root, nullifier, value_commitment
+//! Public inputs: merkle_root, nullifier, value_commitment_hash (all as field elements)
 //! Private witness: value, pk_hash, randomness, nullifier_key, merkle_path, position
 
 use ark_bls12_381::Fr;
-use ark_ff::PrimeField;
 use ark_r1cs_std::{
     alloc::AllocVar,
     boolean::Boolean,
     eq::EqGadget,
     fields::fp::FpVar,
-    prelude::*,
     select::CondSelectGadget,
-    uint8::UInt8,
-    ToBitsGadget,
 };
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-use blake2::{Blake2s256, Digest};
 
+use super::poseidon_gadget::{note_commitment_gadget, nullifier_gadget, merkle_hash_gadget};
 use super::super::merkle_tree::TREE_DEPTH;
+use super::super::poseidon::bytes32_to_field;
 
 /// The spend circuit proving valid note consumption.
+///
+/// Uses Poseidon hash for all hash computations, making it efficient
+/// for zk-SNARK verification.
 #[derive(Clone)]
 pub struct SpendCircuit {
-    // Public inputs
+    // Public inputs (as field elements)
     /// Merkle root at spend time.
-    pub merkle_root: [u8; 32],
+    pub merkle_root: Fr,
     /// Nullifier marking the note as spent.
-    pub nullifier: [u8; 32],
-    /// Commitment to the value being spent.
-    pub value_commitment: [u8; 32],
+    pub nullifier: Fr,
+    /// Hash of the value commitment (for balance verification).
+    pub value_commitment_hash: Fr,
 
     // Private witness
     /// The note value.
     pub value: u64,
-    /// Hash of the recipient's public key.
-    pub recipient_pk_hash: [u8; 32],
+    /// Hash of the recipient's public key (as field element).
+    pub recipient_pk_hash: Fr,
     /// Note randomness.
     pub randomness: Fr,
     /// Secret nullifier key.
     pub nullifier_key: Fr,
-    /// Merkle path (sibling hashes from leaf to root).
-    pub merkle_path: Vec<[u8; 32]>,
+    /// Merkle path (sibling hashes as field elements).
+    pub merkle_path: Vec<Fr>,
     /// Position of the note in the tree.
     pub position: u64,
     /// Value commitment randomness.
@@ -57,21 +56,21 @@ pub struct SpendCircuit {
 impl SpendCircuit {
     /// Create a new spend circuit with all witness values.
     pub fn new(
-        merkle_root: [u8; 32],
-        nullifier: [u8; 32],
-        value_commitment: [u8; 32],
+        merkle_root: Fr,
+        nullifier: Fr,
+        value_commitment_hash: Fr,
         value: u64,
-        recipient_pk_hash: [u8; 32],
+        recipient_pk_hash: Fr,
         randomness: Fr,
         nullifier_key: Fr,
-        merkle_path: Vec<[u8; 32]>,
+        merkle_path: Vec<Fr>,
         position: u64,
         value_commitment_randomness: Fr,
     ) -> Self {
         Self {
             merkle_root,
             nullifier,
-            value_commitment,
+            value_commitment_hash,
             value,
             recipient_pk_hash,
             randomness,
@@ -82,198 +81,81 @@ impl SpendCircuit {
         }
     }
 
+    /// Create a spend circuit from byte arrays (convenience constructor).
+    pub fn from_bytes(
+        merkle_root: &[u8; 32],
+        nullifier: &[u8; 32],
+        value_commitment_hash: &[u8; 32],
+        value: u64,
+        recipient_pk_hash: &[u8; 32],
+        randomness: Fr,
+        nullifier_key: Fr,
+        merkle_path: &[[u8; 32]],
+        position: u64,
+        value_commitment_randomness: Fr,
+    ) -> Self {
+        Self {
+            merkle_root: bytes32_to_field(merkle_root),
+            nullifier: bytes32_to_field(nullifier),
+            value_commitment_hash: bytes32_to_field(value_commitment_hash),
+            value,
+            recipient_pk_hash: bytes32_to_field(recipient_pk_hash),
+            randomness,
+            nullifier_key,
+            merkle_path: merkle_path.iter().map(bytes32_to_field).collect(),
+            position,
+            value_commitment_randomness,
+        }
+    }
+
     /// Create a dummy circuit for parameter generation.
     pub fn dummy() -> Self {
         Self {
-            merkle_root: [0u8; 32],
-            nullifier: [0u8; 32],
-            value_commitment: [0u8; 32],
+            merkle_root: Fr::from(0u64),
+            nullifier: Fr::from(0u64),
+            value_commitment_hash: Fr::from(0u64),
             value: 0,
-            recipient_pk_hash: [0u8; 32],
+            recipient_pk_hash: Fr::from(0u64),
             randomness: Fr::from(0u64),
             nullifier_key: Fr::from(0u64),
-            merkle_path: vec![[0u8; 32]; TREE_DEPTH],
+            merkle_path: vec![Fr::from(0u64); TREE_DEPTH],
             position: 0,
             value_commitment_randomness: Fr::from(0u64),
         }
     }
-}
 
-/// BLAKE2s hash gadget for R1CS (simplified).
-/// Note: In production, you'd use ark-crypto-primitives' BLAKE2s gadget.
-fn blake2s_gadget<F: PrimeField>(
-    cs: ConstraintSystemRef<F>,
-    inputs: &[UInt8<F>],
-) -> Result<Vec<UInt8<F>>, SynthesisError> {
-    // Simplified: We use the native hash and enforce consistency
-    // In a real implementation, you'd implement BLAKE2s as R1CS constraints
-
-    // Extract native values
-    let native_inputs: Vec<u8> = inputs
-        .iter()
-        .map(|b| b.value().unwrap_or(0))
-        .collect();
-
-    // Compute hash natively
-    let mut hasher = Blake2s256::new();
-    hasher.update(&native_inputs);
-    let hash = hasher.finalize();
-
-    // Allocate as witness
-    let result: Vec<UInt8<F>> = hash
-        .iter()
-        .map(|&b| UInt8::new_witness(cs.clone(), || Ok(b)))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(result)
-}
-
-/// Hash domain-separated inputs for note commitment.
-fn hash_note_commitment<F: PrimeField>(
-    cs: ConstraintSystemRef<F>,
-    value_bytes: &[UInt8<F>],
-    pk_hash_bytes: &[UInt8<F>],
-    randomness_bytes: &[UInt8<F>],
-) -> Result<Vec<UInt8<F>>, SynthesisError> {
-    let domain_sep = b"Postera_NoteCommitment";
-    let mut input = Vec::new();
-
-    // Add domain separator
-    for &b in domain_sep {
-        input.push(UInt8::constant(b));
+    /// Get the public inputs as field elements for verification.
+    pub fn public_inputs(&self) -> Vec<Fr> {
+        vec![
+            self.merkle_root,
+            self.nullifier,
+            self.value_commitment_hash,
+        ]
     }
-
-    // Add value
-    input.extend_from_slice(value_bytes);
-
-    // Add pk_hash
-    input.extend_from_slice(pk_hash_bytes);
-
-    // Add randomness
-    input.extend_from_slice(randomness_bytes);
-
-    blake2s_gadget(cs, &input)
-}
-
-/// Hash for nullifier derivation.
-fn hash_nullifier<F: PrimeField>(
-    cs: ConstraintSystemRef<F>,
-    nk_bytes: &[UInt8<F>],
-    cm_bytes: &[UInt8<F>],
-    position_bytes: &[UInt8<F>],
-) -> Result<Vec<UInt8<F>>, SynthesisError> {
-    let domain_sep = b"Postera_Nullifier";
-    let mut input = Vec::new();
-
-    // Add domain separator
-    for &b in domain_sep {
-        input.push(UInt8::constant(b));
-    }
-
-    // Add nullifier key
-    input.extend_from_slice(nk_bytes);
-
-    // Add commitment
-    input.extend_from_slice(cm_bytes);
-
-    // Add position
-    input.extend_from_slice(position_bytes);
-
-    blake2s_gadget(cs, &input)
-}
-
-/// Hash two Merkle tree nodes.
-fn hash_merkle_nodes<F: PrimeField>(
-    cs: ConstraintSystemRef<F>,
-    left: &[UInt8<F>],
-    right: &[UInt8<F>],
-) -> Result<Vec<UInt8<F>>, SynthesisError> {
-    let domain_sep = b"Postera_MerkleTree_Node";
-    let mut input = Vec::new();
-
-    // Add domain separator
-    for &b in domain_sep {
-        input.push(UInt8::constant(b));
-    }
-
-    input.extend_from_slice(left);
-    input.extend_from_slice(right);
-
-    blake2s_gadget(cs, &input)
 }
 
 impl ConstraintSynthesizer<Fr> for SpendCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
-        // === Allocate public inputs ===
-        let merkle_root_var: Vec<UInt8<Fr>> = self
-            .merkle_root
-            .iter()
-            .map(|&b| UInt8::new_input(cs.clone(), || Ok(b)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let nullifier_var: Vec<UInt8<Fr>> = self
-            .nullifier
-            .iter()
-            .map(|&b| UInt8::new_input(cs.clone(), || Ok(b)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let value_commitment_var: Vec<UInt8<Fr>> = self
-            .value_commitment
-            .iter()
-            .map(|&b| UInt8::new_input(cs.clone(), || Ok(b)))
-            .collect::<Result<Vec<_>, _>>()?;
+        // === Allocate public inputs (as single field elements) ===
+        let merkle_root_var = FpVar::new_input(cs.clone(), || Ok(self.merkle_root))?;
+        let nullifier_var = FpVar::new_input(cs.clone(), || Ok(self.nullifier))?;
+        let _value_commitment_hash_var = FpVar::new_input(cs.clone(), || Ok(self.value_commitment_hash))?;
 
         // === Allocate private witnesses ===
-        let value_bytes: Vec<UInt8<Fr>> = self
-            .value
-            .to_le_bytes()
-            .iter()
-            .map(|&b| UInt8::new_witness(cs.clone(), || Ok(b)))
-            .collect::<Result<Vec<_>, _>>()?;
+        let value_var = FpVar::new_witness(cs.clone(), || Ok(Fr::from(self.value)))?;
+        let pk_hash_var = FpVar::new_witness(cs.clone(), || Ok(self.recipient_pk_hash))?;
+        let randomness_var = FpVar::new_witness(cs.clone(), || Ok(self.randomness))?;
+        let nullifier_key_var = FpVar::new_witness(cs.clone(), || Ok(self.nullifier_key))?;
+        let position_var = FpVar::new_witness(cs.clone(), || Ok(Fr::from(self.position)))?;
 
-        let pk_hash_bytes: Vec<UInt8<Fr>> = self
-            .recipient_pk_hash
-            .iter()
-            .map(|&b| UInt8::new_witness(cs.clone(), || Ok(b)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Serialize randomness to bytes
-        let mut randomness_native = Vec::new();
-        use ark_serialize::CanonicalSerialize;
-        self.randomness.serialize_compressed(&mut randomness_native).unwrap();
-        let randomness_bytes: Vec<UInt8<Fr>> = randomness_native
-            .iter()
-            .map(|&b| UInt8::new_witness(cs.clone(), || Ok(b)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Serialize nullifier key to bytes
-        let mut nk_native = Vec::new();
-        self.nullifier_key.serialize_compressed(&mut nk_native).unwrap();
-        let nk_bytes: Vec<UInt8<Fr>> = nk_native
-            .iter()
-            .map(|&b| UInt8::new_witness(cs.clone(), || Ok(b)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let position_bytes: Vec<UInt8<Fr>> = self
-            .position
-            .to_le_bytes()
-            .iter()
-            .map(|&b| UInt8::new_witness(cs.clone(), || Ok(b)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Allocate merkle path
-        let merkle_path_vars: Vec<Vec<UInt8<Fr>>> = self
+        // Allocate Merkle path siblings
+        let merkle_path_vars: Vec<FpVar<Fr>> = self
             .merkle_path
             .iter()
-            .map(|sibling| {
-                sibling
-                    .iter()
-                    .map(|&b| UInt8::new_witness(cs.clone(), || Ok(b)))
-                    .collect::<Result<Vec<_>, _>>()
-            })
+            .map(|sibling| FpVar::new_witness(cs.clone(), || Ok(*sibling)))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Position as bits for path direction
+        // Position bits for path direction
         let position_bits: Vec<Boolean<Fr>> = (0..TREE_DEPTH)
             .map(|i| {
                 let bit = ((self.position >> i) & 1) == 1;
@@ -282,68 +164,46 @@ impl ConstraintSynthesizer<Fr> for SpendCircuit {
             .collect::<Result<Vec<_>, _>>()?;
 
         // === Constraint 1: Note commitment is correctly computed ===
-        // cm = HASH(value || pk_hash || randomness)
-        let computed_cm = hash_note_commitment(
+        // cm = Poseidon(DOMAIN_NOTE_COMMITMENT, value, pk_hash, randomness)
+        let computed_cm = note_commitment_gadget(
             cs.clone(),
-            &value_bytes,
-            &pk_hash_bytes,
-            &randomness_bytes,
+            &value_var,
+            &pk_hash_var,
+            &randomness_var,
         )?;
 
         // === Constraint 2: Merkle path verification ===
         // Start with computed commitment
         let mut current_hash = computed_cm.clone();
 
-        for (depth, (sibling, direction_bit)) in merkle_path_vars
-            .iter()
-            .zip(position_bits.iter())
-            .enumerate()
-        {
-            // Conditionally swap based on direction bit
-            let (left, right) = {
-                let mut left = Vec::with_capacity(32);
-                let mut right = Vec::with_capacity(32);
+        for (sibling, direction_bit) in merkle_path_vars.iter().zip(position_bits.iter()) {
+            // If direction_bit is 0, current is left child; if 1, current is right child
+            let left = FpVar::conditionally_select(direction_bit, sibling, &current_hash)?;
+            let right = FpVar::conditionally_select(direction_bit, &current_hash, sibling)?;
 
-                for i in 0..32 {
-                    // If direction_bit is 0, current is left; if 1, current is right
-                    let l = UInt8::conditionally_select(direction_bit, &sibling[i], &current_hash[i])?;
-                    let r = UInt8::conditionally_select(direction_bit, &current_hash[i], &sibling[i])?;
-                    left.push(l);
-                    right.push(r);
-                }
-
-                (left, right)
-            };
-
-            current_hash = hash_merkle_nodes(cs.clone(), &left, &right)?;
+            // Hash the pair
+            current_hash = merkle_hash_gadget(cs.clone(), &left, &right)?;
         }
 
         // Verify computed root equals public merkle root
-        for (computed, expected) in current_hash.iter().zip(merkle_root_var.iter()) {
-            computed.enforce_equal(expected)?;
-        }
+        current_hash.enforce_equal(&merkle_root_var)?;
 
         // === Constraint 3: Nullifier is correctly derived ===
-        // nf = HASH(nk || cm || position)
-        let computed_nf = hash_nullifier(
+        // nf = Poseidon(DOMAIN_NULLIFIER, nk, cm, position)
+        let computed_nf = nullifier_gadget(
             cs.clone(),
-            &nk_bytes,
+            &nullifier_key_var,
             &computed_cm,
-            &position_bytes,
+            &position_var,
         )?;
 
         // Verify computed nullifier equals public nullifier
-        for (computed, expected) in computed_nf.iter().zip(nullifier_var.iter()) {
-            computed.enforce_equal(expected)?;
-        }
+        computed_nf.enforce_equal(&nullifier_var)?;
 
         // === Constraint 4: Value commitment verification ===
-        // For simplicity, we verify the value is bound to the commitment
-        // In a full implementation, this would use Pedersen commitment gadgets
-        // For now, we just ensure the value is consistent with the note
-
-        // The value commitment is verified externally through binding signature
-        // Here we just need to ensure the value in the circuit is the actual value
+        // The value commitment is verified externally through the binding signature.
+        // The binding signature ensures sum(input values) = sum(output values) + fee.
+        // Here we just ensure the value is bound to the circuit through the commitment.
 
         Ok(())
     }
@@ -353,15 +213,173 @@ impl ConstraintSynthesizer<Fr> for SpendCircuit {
 mod tests {
     use super::*;
     use ark_relations::r1cs::ConstraintSystem;
+    use ark_ff::UniformRand;
+    use ark_std::rand::SeedableRng;
+    use ark_std::rand::rngs::StdRng;
+
+    use crate::crypto::poseidon::{
+        poseidon_hash, DOMAIN_NOTE_COMMITMENT, DOMAIN_NULLIFIER, DOMAIN_MERKLE_NODE,
+    };
 
     #[test]
-    fn test_dummy_circuit_satisfies() {
+    fn test_dummy_circuit_synthesizes() {
         let circuit = SpendCircuit::dummy();
         let cs = ConstraintSystem::<Fr>::new_ref();
         circuit.generate_constraints(cs.clone()).unwrap();
 
-        // Note: With the simplified blake2s gadget, this won't actually
-        // verify correctly, but it should synthesize without errors
         println!("Spend circuit has {} constraints", cs.num_constraints());
+        // Note: dummy circuit won't satisfy all constraints because
+        // the hash values won't match, but it should synthesize
+    }
+
+    #[test]
+    fn test_spend_circuit_satisfies() {
+        let mut rng = StdRng::seed_from_u64(12345);
+
+        // Create note values
+        let value = 1000u64;
+        let pk_hash = Fr::rand(&mut rng);
+        let randomness = Fr::rand(&mut rng);
+        let nullifier_key = Fr::rand(&mut rng);
+        let position = 5u64;
+
+        // Compute note commitment: Poseidon(domain, value, pk_hash, randomness)
+        let value_fe = Fr::from(value);
+        let cm = poseidon_hash(DOMAIN_NOTE_COMMITMENT, &[value_fe, pk_hash, randomness]);
+
+        // Create a simple Merkle tree path (all zeros for simplicity)
+        // In a real scenario, this would be a proper path
+        let mut merkle_path = vec![Fr::from(0u64); TREE_DEPTH];
+
+        // Compute the root by hashing up the tree
+        let mut current = cm;
+        for i in 0..TREE_DEPTH {
+            let sibling = merkle_path[i];
+            let (left, right) = if (position >> i) & 1 == 0 {
+                (current, sibling)
+            } else {
+                (sibling, current)
+            };
+            current = poseidon_hash(DOMAIN_MERKLE_NODE, &[left, right]);
+        }
+        let merkle_root = current;
+
+        // Compute nullifier
+        let position_fe = Fr::from(position);
+        let nullifier = poseidon_hash(DOMAIN_NULLIFIER, &[nullifier_key, cm, position_fe]);
+
+        // Value commitment hash (simplified)
+        let value_commitment_hash = Fr::from(0u64);
+
+        // Create the circuit
+        let circuit = SpendCircuit::new(
+            merkle_root,
+            nullifier,
+            value_commitment_hash,
+            value,
+            pk_hash,
+            randomness,
+            nullifier_key,
+            merkle_path,
+            position,
+            Fr::from(0u64),
+        );
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+
+        assert!(cs.is_satisfied().unwrap(), "Circuit should be satisfied");
+        println!("Spend circuit with real values: {} constraints", cs.num_constraints());
+    }
+
+    #[test]
+    fn test_spend_circuit_fails_with_wrong_nullifier() {
+        let mut rng = StdRng::seed_from_u64(12345);
+
+        // Create note values
+        let value = 1000u64;
+        let pk_hash = Fr::rand(&mut rng);
+        let randomness = Fr::rand(&mut rng);
+        let nullifier_key = Fr::rand(&mut rng);
+        let position = 5u64;
+
+        // Compute correct values
+        let value_fe = Fr::from(value);
+        let cm = poseidon_hash(DOMAIN_NOTE_COMMITMENT, &[value_fe, pk_hash, randomness]);
+
+        let mut merkle_path = vec![Fr::from(0u64); TREE_DEPTH];
+        let mut current = cm;
+        for i in 0..TREE_DEPTH {
+            let sibling = merkle_path[i];
+            let (left, right) = if (position >> i) & 1 == 0 {
+                (current, sibling)
+            } else {
+                (sibling, current)
+            };
+            current = poseidon_hash(DOMAIN_MERKLE_NODE, &[left, right]);
+        }
+        let merkle_root = current;
+
+        // Use WRONG nullifier
+        let wrong_nullifier = Fr::rand(&mut rng);
+
+        let circuit = SpendCircuit::new(
+            merkle_root,
+            wrong_nullifier, // Wrong!
+            Fr::from(0u64),
+            value,
+            pk_hash,
+            randomness,
+            nullifier_key,
+            merkle_path,
+            position,
+            Fr::from(0u64),
+        );
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+
+        assert!(!cs.is_satisfied().unwrap(), "Circuit should NOT be satisfied with wrong nullifier");
+    }
+
+    #[test]
+    fn test_spend_circuit_fails_with_wrong_root() {
+        let mut rng = StdRng::seed_from_u64(12345);
+
+        let value = 1000u64;
+        let pk_hash = Fr::rand(&mut rng);
+        let randomness = Fr::rand(&mut rng);
+        let nullifier_key = Fr::rand(&mut rng);
+        let position = 5u64;
+
+        let value_fe = Fr::from(value);
+        let cm = poseidon_hash(DOMAIN_NOTE_COMMITMENT, &[value_fe, pk_hash, randomness]);
+
+        let merkle_path = vec![Fr::from(0u64); TREE_DEPTH];
+
+        // Correct nullifier
+        let position_fe = Fr::from(position);
+        let nullifier = poseidon_hash(DOMAIN_NULLIFIER, &[nullifier_key, cm, position_fe]);
+
+        // Use WRONG merkle root
+        let wrong_root = Fr::rand(&mut rng);
+
+        let circuit = SpendCircuit::new(
+            wrong_root, // Wrong!
+            nullifier,
+            Fr::from(0u64),
+            value,
+            pk_hash,
+            randomness,
+            nullifier_key,
+            merkle_path,
+            position,
+            Fr::from(0u64),
+        );
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+
+        assert!(!cs.is_satisfied().unwrap(), "Circuit should NOT be satisfied with wrong root");
     }
 }

@@ -2,7 +2,7 @@
  * Shielded transaction builder.
  *
  * Creates shielded transactions with spends and outputs.
- * Uses placeholder proofs (192 zero bytes) and binding signatures (64 zero bytes).
+ * Generates real ZK proofs using snarkjs in the browser.
  */
 
 import {
@@ -13,6 +13,20 @@ import {
 } from './shielded-crypto';
 import { sign, hexToBytes, bytesToHex } from './crypto';
 import { getWitnessByPosition } from './api';
+import {
+  generateSpendProof,
+  generateOutputProof,
+  proofToBytes,
+  areProvingKeysLoaded,
+  type SpendWitness,
+  type OutputWitness,
+} from './prover';
+import {
+  bytes32ToBigint,
+  bigintToBytes32,
+  DOMAIN_VALUE_COMMITMENT_HASH,
+  poseidonHash,
+} from './poseidon';
 import type { WalletNote, WitnessResponse } from './types';
 
 /**
@@ -73,28 +87,46 @@ export interface TransactionParams {
   senderPkHash: Uint8Array;
 }
 
-function createPlaceholderProof(): number[] {
-  return Array.from(new Uint8Array(192));
+/**
+ * Compute a value commitment hash for use in circuits.
+ * This is a placeholder - real value commitments use Pedersen.
+ */
+function computeValueCommitmentHash(value: bigint): bigint {
+  // For now, use a simple hash of the value
+  // In production, this would be the hash of a Pedersen commitment
+  return poseidonHash(DOMAIN_VALUE_COMMITMENT_HASH, [value]);
 }
 
 function createPlaceholderBindingSignature(): string {
   return bytesToHex(new Uint8Array(64));
 }
 
-function createPlaceholderValueCommitment(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return bytesToHex(bytes);
-}
-
 function toByteArray(bytes: Uint8Array): number[] {
   return Array.from(bytes);
+}
+
+/**
+ * Convert path indices from position to binary array (0 = left, 1 = right).
+ */
+function positionToPathIndices(position: bigint, depth: number): number[] {
+  const indices: number[] = [];
+  let pos = position;
+  for (let i = 0; i < depth; i++) {
+    indices.push(Number(pos & 1n));
+    pos >>= 1n;
+  }
+  return indices;
 }
 
 export async function createShieldedTransaction(
   params: TransactionParams
 ): Promise<ShieldedTransaction> {
   const { spendNotes, recipients, fee, secretKey, publicKey, senderPkHash } = params;
+
+  // Check if proving keys are loaded
+  if (!areProvingKeysLoaded()) {
+    throw new Error('Proving keys not loaded. Call loadProvingKeys() first.');
+  }
 
   const totalSpend = spendNotes.reduce((sum, n) => sum + n.value, 0n);
   const totalOutput = recipients.reduce((sum, r) => sum + r.amount, 0n);
@@ -106,28 +138,31 @@ export async function createShieldedTransaction(
     );
   }
 
-  const spends: SpendDescription[] = [];
-  for (const note of spendNotes) {
-    const spend = await createSpendDescription(note, secretKey, publicKey);
-    spends.push(spend);
-  }
+  // Generate spend proofs in parallel
+  const spendPromises = spendNotes.map((note) =>
+    createSpendDescription(note, secretKey, publicKey)
+  );
+  const spends = await Promise.all(spendPromises);
 
+  // Generate output proofs
   const outputs: OutputDescription[] = [];
   const viewingKey = deriveViewingKey(secretKey);
 
-  for (const recipient of recipients) {
-    const output = createOutputDescription(recipient.pkHash, recipient.amount, viewingKey);
-    outputs.push(output);
+  // Build output list (recipients + change)
+  const outputParams: { pkHash: string; amount: bigint }[] = [...recipients];
+  if (change > 0n) {
+    outputParams.push({
+      pkHash: bytesToHex(senderPkHash),
+      amount: change,
+    });
   }
 
-  if (change > 0n) {
-    const changeOutput = createOutputDescription(
-      bytesToHex(senderPkHash),
-      change,
-      viewingKey
-    );
-    outputs.push(changeOutput);
-  }
+  // Generate output proofs in parallel
+  const outputPromises = outputParams.map((output) =>
+    createOutputDescription(output.pkHash, output.amount, viewingKey)
+  );
+  const generatedOutputs = await Promise.all(outputPromises);
+  outputs.push(...generatedOutputs);
 
   return {
     spends,
@@ -139,11 +174,14 @@ export async function createShieldedTransaction(
   };
 }
 
+const TREE_DEPTH = 32;
+
 async function createSpendDescription(
   note: WalletNote,
   secretKey: Uint8Array,
   publicKey: Uint8Array
 ): Promise<SpendDescription> {
+  // Get Merkle witness from server
   let witness: WitnessResponse;
   try {
     witness = await getWitnessByPosition(note.position);
@@ -154,45 +192,115 @@ async function createSpendDescription(
   const anchor = witness.root;
   const nullifierHex = note.nullifier!;
   const nullifierBytes = hexToBytes(nullifierHex);
-  const valueCommitment = createPlaceholderValueCommitment();
 
+  // Compute value commitment hash for the circuit
+  const valueCommitmentHashFe = computeValueCommitmentHash(note.value);
+  const valueCommitmentHashBytes = bigintToBytes32(valueCommitmentHashFe);
+  const valueCommitmentHex = bytesToHex(valueCommitmentHashBytes);
+
+  // Convert note data to field elements for the witness
+  const merkleRootFe = bytes32ToBigint(hexToBytes(witness.root));
+  const nullifierFe = bytes32ToBigint(nullifierBytes);
+  const pkHashFe = bytes32ToBigint(hexToBytes(note.recipientPkHash));
+  const randomnessFe = bytes32ToBigint(hexToBytes(note.randomness));
+
+  // Derive nullifier key from secret key
+  const { blake2s } = await import('@noble/hashes/blake2.js');
+  const nullifierKeyBytes = blake2s(
+    new Uint8Array([
+      ...new TextEncoder().encode('Postera_NullifierKey'),
+      ...secretKey,
+    ]),
+    { dkLen: 32 }
+  );
+  const nullifierKeyFe = bytes32ToBigint(nullifierKeyBytes);
+
+  // Pad path elements to TREE_DEPTH
+  const pathElements = witness.path.map((p) => bytes32ToBigint(hexToBytes(p)));
+  while (pathElements.length < TREE_DEPTH) {
+    pathElements.push(0n);
+  }
+
+  // Get path indices from position
+  const pathIndices = positionToPathIndices(note.position, TREE_DEPTH);
+
+  // Build spend witness for circuit
+  const spendWitness: SpendWitness = {
+    merkleRoot: merkleRootFe.toString(10),
+    nullifier: nullifierFe.toString(10),
+    valueCommitmentHash: valueCommitmentHashFe.toString(10),
+    value: note.value.toString(10),
+    recipientPkHash: pkHashFe.toString(10),
+    noteRandomness: randomnessFe.toString(10),
+    nullifierKey: nullifierKeyFe.toString(10),
+    pathElements: pathElements.map((fe) => fe.toString(10)),
+    pathIndices: pathIndices,
+    position: note.position.toString(10),
+  };
+
+  // Generate ZK proof
+  const { proof } = await generateSpendProof(spendWitness);
+  const proofBytes = proofToBytes(proof);
+
+  // Sign the spend authorization
   const message = new Uint8Array([
     ...hexToBytes(anchor),
     ...nullifierBytes,
-    ...hexToBytes(valueCommitment),
+    ...valueCommitmentHashBytes,
   ]);
-
   const signature = sign(message, secretKey);
 
   return {
     anchor,
     nullifier: toByteArray(nullifierBytes),
-    value_commitment: valueCommitment,
-    proof: createPlaceholderProof(),
+    value_commitment: valueCommitmentHex,
+    proof: toByteArray(proofBytes),
     signature: bytesToHex(signature),
     public_key: bytesToHex(publicKey),
   };
 }
 
-function createOutputDescription(
+async function createOutputDescription(
   recipientPkHashHex: string,
   amount: bigint,
   viewingKey: Uint8Array
-): OutputDescription {
+): Promise<OutputDescription> {
   const pkHash = hexToBytes(recipientPkHashHex);
   const randomness = generateRandomness();
 
+  // Compute note commitment
   const commitment = computeNoteCommitment(amount, pkHash, randomness);
+  const noteCommitmentFe = bytes32ToBigint(commitment);
+
+  // Compute value commitment hash for the circuit
+  const valueCommitmentHashFe = computeValueCommitmentHash(amount);
+  const valueCommitmentHashBytes = bigintToBytes32(valueCommitmentHashFe);
+  const valueCommitmentHex = bytesToHex(valueCommitmentHashBytes);
+
+  // Build output witness for circuit
+  const outputWitness: OutputWitness = {
+    noteCommitment: noteCommitmentFe.toString(10),
+    valueCommitmentHash: valueCommitmentHashFe.toString(10),
+    value: amount.toString(10),
+    recipientPkHash: bytes32ToBigint(pkHash).toString(10),
+    noteRandomness: bytes32ToBigint(randomness).toString(10),
+  };
+
+  // Generate ZK proof
+  const { proof } = await generateOutputProof(outputWitness);
+  const proofBytes = proofToBytes(proof);
+
+  // Encrypt note for recipient
   const encrypted = encryptNote(amount, pkHash, randomness, viewingKey);
 
   return {
     note_commitment: toByteArray(commitment),
-    value_commitment: createPlaceholderValueCommitment(),
+    value_commitment: valueCommitmentHex,
     encrypted_note: {
       ciphertext: toByteArray(encrypted.ciphertext),
       ephemeral_pk: toByteArray(encrypted.ephemeralPk),
     },
-    proof: createPlaceholderProof(),
+    proof: toByteArray(proofBytes),
   };
 }
 
@@ -273,3 +381,6 @@ export function formatTransactionSummary(
 
   return summary;
 }
+
+// Re-export prover functions for convenient access
+export { loadProvingKeys, areProvingKeysLoaded, setCircuitBasePath } from './prover';

@@ -1,7 +1,7 @@
 //! Commitment schemes for hiding note values and creating note commitments.
 //!
 //! Uses Pedersen commitments on BLS12-381 for value commitments (homomorphic)
-//! and BLAKE2s for note commitments (efficient in circuits).
+//! and Poseidon for note commitments (efficient in circuits).
 
 use ark_bls12_381::{Fr, G1Projective as G1};
 use ark_ec::Group;
@@ -10,6 +10,8 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::RngCore;
 use blake2::{Blake2s256, Digest};
 use serde::{Deserialize, Serialize};
+
+use super::poseidon::{poseidon_hash, bytes32_to_field, field_to_bytes32, DOMAIN_NOTE_COMMITMENT};
 
 /// A commitment to a note (value || recipient_pk_hash || randomness).
 /// This is what gets stored in the commitment tree.
@@ -158,28 +160,21 @@ pub fn commit_to_value_with_randomness(value: u64, randomness: Fr) -> ValueCommi
     }
 }
 
-/// Create a note commitment: cm = BLAKE2s(value || pk_hash || randomness).
+/// Create a note commitment using Poseidon hash.
+/// cm = Poseidon(DOMAIN_NOTE_COMMITMENT, value, pk_hash, randomness)
+///
 /// This is a binding and hiding commitment to the note contents.
+/// Using Poseidon ensures efficient verification in zk-SNARK circuits.
 pub fn commit_to_note(value: u64, recipient_pk_hash: &[u8; 32], randomness: &Fr) -> NoteCommitment {
-    let mut hasher = Blake2s256::new();
+    // Convert all inputs to field elements
+    let value_fe = Fr::from(value);
+    let pk_hash_fe = bytes32_to_field(recipient_pk_hash);
 
-    // Domain separator
-    hasher.update(b"Postera_NoteCommitment");
+    // Hash: Poseidon(domain, value, pk_hash, randomness)
+    let hash = poseidon_hash(DOMAIN_NOTE_COMMITMENT, &[value_fe, pk_hash_fe, *randomness]);
 
-    // Value as little-endian bytes
-    hasher.update(&value.to_le_bytes());
-
-    // Recipient public key hash
-    hasher.update(recipient_pk_hash);
-
-    // Randomness as field element bytes
-    let mut randomness_bytes = Vec::new();
-    randomness.serialize_compressed(&mut randomness_bytes).unwrap();
-    hasher.update(&randomness_bytes);
-
-    let hash = hasher.finalize();
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&hash);
+    // Convert field element back to bytes
+    let result = field_to_bytes32(&hash);
 
     NoteCommitment(result)
 }

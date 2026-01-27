@@ -265,43 +265,48 @@ pub fn verify_output_proof(
     .unwrap_or(false)
 }
 
-/// Convert public inputs from bytes to field elements.
-pub fn bytes_to_public_inputs(
+/// Convert spend public inputs from bytes to field elements.
+///
+/// The new circuit design uses 3 field elements as public inputs:
+/// - merkle_root: Tree root as a single field element
+/// - nullifier: Nullifier as a single field element
+/// - value_commitment_hash: Hash of value commitment as a single field element
+pub fn spend_bytes_to_public_inputs(
     merkle_root: &[u8; 32],
     nullifier: &[u8; 32],
-    value_commitment: &[u8; 32],
+    value_commitment_hash: &[u8; 32],
 ) -> Vec<Fr> {
-    let mut inputs = Vec::new();
-
-    // Convert each byte array to field elements (one element per byte for simplicity)
-    for &b in merkle_root.iter() {
-        inputs.push(Fr::from(b as u64));
-    }
-    for &b in nullifier.iter() {
-        inputs.push(Fr::from(b as u64));
-    }
-    for &b in value_commitment.iter() {
-        inputs.push(Fr::from(b as u64));
-    }
-
-    inputs
+    use super::poseidon::bytes32_to_field;
+    vec![
+        bytes32_to_field(merkle_root),
+        bytes32_to_field(nullifier),
+        bytes32_to_field(value_commitment_hash),
+    ]
 }
 
 /// Convert output public inputs from bytes to field elements.
+///
+/// The new circuit design uses 2 field elements as public inputs:
+/// - note_commitment: Note commitment as a single field element
+/// - value_commitment_hash: Hash of value commitment as a single field element
 pub fn output_bytes_to_public_inputs(
     note_commitment: &[u8; 32],
-    value_commitment: &[u8; 32],
+    value_commitment_hash: &[u8; 32],
 ) -> Vec<Fr> {
-    let mut inputs = Vec::new();
+    use super::poseidon::bytes32_to_field;
+    vec![
+        bytes32_to_field(note_commitment),
+        bytes32_to_field(value_commitment_hash),
+    ]
+}
 
-    for &b in note_commitment.iter() {
-        inputs.push(Fr::from(b as u64));
-    }
-    for &b in value_commitment.iter() {
-        inputs.push(Fr::from(b as u64));
-    }
-
-    inputs
+/// Alias for backwards compatibility
+pub fn bytes_to_public_inputs(
+    merkle_root: &[u8; 32],
+    nullifier: &[u8; 32],
+    value_commitment_hash: &[u8; 32],
+) -> Vec<Fr> {
+    spend_bytes_to_public_inputs(merkle_root, nullifier, value_commitment_hash)
 }
 
 #[cfg(test)]

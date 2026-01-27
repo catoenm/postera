@@ -23,7 +23,7 @@ ark-serialize = { version = "0.4", features = ["derive"] }
 ark-relations = "0.4"
 ark-r1cs-std = "0.4"
 ark-snark = "0.4"
-ark-crypto-primitives = { version = "0.4", features = ["commitment", "merkle_tree", "prf", "sponge"] }
+ark-crypto-primitives = { version = "0.4", features = ["commitment", "merkle_tree", "prf", "sponge", "r1cs"] }
 
 # Encryption (for note encryption)
 chacha20poly1305 = "0.10"

@@ -3,17 +3,20 @@
 //! This module contains the R1CS circuits for:
 //! - Spend: Proves valid consumption of a note
 //! - Output: Proves valid creation of a note
+//! - Poseidon gadget: Provides Poseidon hash constraints
 
 pub mod spend;
 pub mod output;
+pub mod poseidon_gadget;
 
 pub use spend::SpendCircuit;
 pub use output::OutputCircuit;
+pub use poseidon_gadget::{
+    poseidon_hash_gadget, note_commitment_gadget, nullifier_gadget, merkle_hash_gadget,
+};
 
 use ark_bls12_381::Fr;
 use ark_ff::PrimeField;
-use ark_r1cs_std::prelude::*;
-use ark_relations::r1cs::{ConstraintSynthesizer, SynthesisError};
 
 /// Convert bytes to field element.
 pub fn bytes_to_field(bytes: &[u8; 32]) -> Fr {
