@@ -98,11 +98,13 @@ impl ShieldedBlockchain {
     /// Create a genesis coinbase for a miner.
     pub fn create_genesis_coinbase(
         miner_pk_hash: [u8; 32],
-        viewing_key: &ViewingKey,
+        _viewing_key: &ViewingKey,  // Kept for API compatibility but not used
     ) -> CoinbaseTransaction {
         let mut rng = ark_std::rand::thread_rng();
         let note = Note::new(BLOCK_REWARD, miner_pk_hash, &mut rng);
-        let encrypted = viewing_key.encrypt_note(&note, &mut rng);
+        // Encrypt using miner's pk_hash so they can decrypt it
+        let miner_key = ViewingKey::from_pk_hash(miner_pk_hash);
+        let encrypted = miner_key.encrypt_note(&note, &mut rng);
 
         CoinbaseTransaction::new(note.commitment(), encrypted, BLOCK_REWARD, 0)
     }
@@ -428,7 +430,7 @@ impl ShieldedBlockchain {
     pub fn create_coinbase(
         &self,
         miner_pk_hash: [u8; 32],
-        viewing_key: &ViewingKey,
+        _viewing_key: &ViewingKey,  // Kept for API compatibility but not used
         extra_fees: u64,
     ) -> CoinbaseTransaction {
         let mut rng = ark_std::rand::thread_rng();
@@ -436,7 +438,9 @@ impl ShieldedBlockchain {
         let reward = BLOCK_REWARD + extra_fees;
 
         let note = Note::new(reward, miner_pk_hash, &mut rng);
-        let encrypted = viewing_key.encrypt_note(&note, &mut rng);
+        // Encrypt using miner's pk_hash so they can decrypt it
+        let miner_key = ViewingKey::from_pk_hash(miner_pk_hash);
+        let encrypted = miner_key.encrypt_note(&note, &mut rng);
 
         CoinbaseTransaction::new(note.commitment(), encrypted, reward, height)
     }

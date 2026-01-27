@@ -9,7 +9,6 @@ import {
   computeNoteCommitment,
   encryptNote,
   generateRandomness,
-  deriveViewingKey,
 } from './shielded-crypto';
 import { sign, hexToBytes, bytesToHex } from './crypto';
 import { getWitnessByPosition } from './api';
@@ -85,6 +84,7 @@ export interface TransactionParams {
   secretKey: Uint8Array;
   publicKey: Uint8Array;
   senderPkHash: Uint8Array;
+  onProgress?: (status: string) => void;
 }
 
 /**
@@ -121,7 +121,11 @@ function positionToPathIndices(position: bigint, depth: number): number[] {
 export async function createShieldedTransaction(
   params: TransactionParams
 ): Promise<ShieldedTransaction> {
-  const { spendNotes, recipients, fee, secretKey, publicKey, senderPkHash } = params;
+  const { spendNotes, recipients, fee, secretKey, publicKey, senderPkHash, onProgress } = params;
+
+  const progress = (msg: string) => {
+    if (onProgress) onProgress(msg);
+  };
 
   // Check if proving keys are loaded
   if (!areProvingKeysLoaded()) {
@@ -138,16 +142,6 @@ export async function createShieldedTransaction(
     );
   }
 
-  // Generate spend proofs in parallel
-  const spendPromises = spendNotes.map((note) =>
-    createSpendDescription(note, secretKey, publicKey)
-  );
-  const spends = await Promise.all(spendPromises);
-
-  // Generate output proofs
-  const outputs: OutputDescription[] = [];
-  const viewingKey = deriveViewingKey(secretKey);
-
   // Build output list (recipients + change)
   const outputParams: { pkHash: string; amount: bigint }[] = [...recipients];
   if (change > 0n) {
@@ -157,12 +151,32 @@ export async function createShieldedTransaction(
     });
   }
 
-  // Generate output proofs in parallel
-  const outputPromises = outputParams.map((output) =>
-    createOutputDescription(output.pkHash, output.amount, viewingKey)
-  );
-  const generatedOutputs = await Promise.all(outputPromises);
-  outputs.push(...generatedOutputs);
+  const totalSteps = spendNotes.length + outputParams.length;
+  let currentStep = 0;
+
+  // Generate spend proofs sequentially to show progress for each
+  progress(`Creating spend proofs (0/${spendNotes.length})...`);
+  const spends: SpendDescription[] = [];
+  for (let i = 0; i < spendNotes.length; i++) {
+    currentStep++;
+    progress(`Creating spend proof ${i + 1}/${spendNotes.length} (step ${currentStep}/${totalSteps})...`);
+    const spend = await createSpendDescription(spendNotes[i], secretKey, publicKey);
+    spends.push(spend);
+  }
+
+  // Generate output proofs sequentially to show progress
+  progress(`Creating output proofs (0/${outputParams.length})...`);
+  const outputs: OutputDescription[] = [];
+  for (let i = 0; i < outputParams.length; i++) {
+    currentStep++;
+    const isChange = i === outputParams.length - 1 && change > 0n;
+    const label = isChange ? 'change' : `recipient ${i + 1}`;
+    progress(`Creating output proof for ${label} (step ${currentStep}/${totalSteps})...`);
+    const output = await createOutputDescription(outputParams[i].pkHash, outputParams[i].amount);
+    outputs.push(output);
+  }
+
+  progress('Finalizing transaction...');
 
   return {
     spends,
@@ -278,8 +292,7 @@ async function createSpendDescription(
 
 async function createOutputDescription(
   recipientPkHashHex: string,
-  amount: bigint,
-  viewingKey: Uint8Array
+  amount: bigint
 ): Promise<OutputDescription> {
   const pkHash = hexToBytes(recipientPkHashHex);
   const randomness = generateRandomness();
@@ -306,8 +319,9 @@ async function createOutputDescription(
   const { proof } = await generateOutputProof(outputWitness);
   const proofBytes = proofToBytes(proof);
 
-  // Encrypt note for recipient
-  const encrypted = encryptNote(amount, pkHash, randomness, viewingKey);
+  // Encrypt note for recipient using their pkHash as the encryption key
+  // (recipient can derive this from their own public key)
+  const encrypted = encryptNote(amount, pkHash, randomness, pkHash);
 
   return {
     note_commitment: toByteArray(commitment),

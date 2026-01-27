@@ -199,7 +199,7 @@ export class ShieldedWallet {
     const decrypted = tryDecryptNoteFromHex(
       output.ciphertext,
       output.ephemeral_pk,
-      this.viewingKey
+      this.pkHash  // Use pkHash for decryption (matches encryption key)
     );
 
     if (!decrypted) {

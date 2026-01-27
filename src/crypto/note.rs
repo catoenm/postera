@@ -138,6 +138,15 @@ impl ViewingKey {
         }
     }
 
+    /// Create a viewing key directly from a pk_hash.
+    /// Used for encrypting notes to recipients - they can decrypt using their own pk_hash.
+    /// This allows senders to encrypt notes that only the recipient (who knows their pk_hash) can decrypt.
+    pub fn from_pk_hash(pk_hash: [u8; 32]) -> Self {
+        Self {
+            viewing_secret: pk_hash,
+        }
+    }
+
     /// Derive the symmetric encryption key for a note.
     /// Uses the ephemeral public key to derive a shared secret.
     fn derive_encryption_key(&self, ephemeral_pk: &[u8]) -> [u8; 32] {

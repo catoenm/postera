@@ -252,7 +252,8 @@ export default function Wallet() {
         throw new Error(validationError);
       }
 
-      // Build transaction
+      // Build transaction with progress updates
+      setSendResult({ success: false, message: `Preparing transaction with ${notesToSpend.length} note(s)...` });
       const tx = await createShieldedTransaction({
         spendNotes: notesToSpend,
         recipients: [{ pkHash: recipientPkHash, amount }],
@@ -260,9 +261,13 @@ export default function Wallet() {
         secretKey: hexToBytes(wallet.secret_key),
         publicKey: hexToBytes(wallet.public_key),
         senderPkHash: shieldedWallet.pkHash,
+        onProgress: (status) => {
+          setSendResult({ success: false, message: status });
+        },
       });
 
       // Submit
+      setSendResult({ success: false, message: 'Submitting transaction to network...' });
       const result = await submitShieldedTransaction(tx);
 
       if ('error' in result) {

@@ -246,10 +246,13 @@ impl ShieldedWallet {
         let mut position = start_position;
         let mut new_notes = 0;
 
+        // Create decryption key from our pk_hash (matches how notes are encrypted)
+        let decryption_key = ViewingKey::from_pk_hash(self.pk_hash);
+
         // Scan transaction outputs
         for tx in &block.transactions {
             for output in &tx.outputs {
-                if let Some(note) = self.viewing_key.decrypt_note(&output.encrypted_note) {
+                if let Some(note) = decryption_key.decrypt_note(&output.encrypted_note) {
                     // Check if this note is for us
                     if note.recipient_pk_hash == self.pk_hash {
                         let wallet_note = WalletNote::new(
@@ -267,7 +270,7 @@ impl ShieldedWallet {
         }
 
         // Scan coinbase
-        if let Some(note) = self.viewing_key.decrypt_note(&block.coinbase.encrypted_note) {
+        if let Some(note) = decryption_key.decrypt_note(&block.coinbase.encrypted_note) {
             if note.recipient_pk_hash == self.pk_hash {
                 let wallet_note = WalletNote::new(
                     note,
@@ -425,8 +428,10 @@ impl ShieldedWallet {
             let value_commitment = commit_to_value(amount, &mut rng);
             let value_commitment_hash = value_commitment.commitment_hash();
 
-            // Encrypt note for recipient
-            let encrypted = self.viewing_key.encrypt_note(&output_note, &mut rng);
+            // Encrypt note for recipient using their pk_hash
+            // (recipient can decrypt using their own pk_hash)
+            let recipient_key = ViewingKey::from_pk_hash(recipient_pk_hash);
+            let encrypted = recipient_key.encrypt_note(&output_note, &mut rng);
 
             // Create output circuit
             let circuit = OutputCircuit::new(
@@ -456,7 +461,9 @@ impl ShieldedWallet {
             let commitment = change_note.commitment();
             let value_commitment = commit_to_value(change, &mut rng);
             let value_commitment_hash = value_commitment.commitment_hash();
-            let encrypted = self.viewing_key.encrypt_note(&change_note, &mut rng);
+            // Encrypt change note using our own pk_hash (so we can decrypt it)
+            let change_key = ViewingKey::from_pk_hash(self.pk_hash);
+            let encrypted = change_key.encrypt_note(&change_note, &mut rng);
 
             // Create output circuit for change
             let circuit = OutputCircuit::new(
@@ -644,13 +651,15 @@ mod tests {
         // Create a note for this wallet
         let mut rng = ark_std::rand::thread_rng();
         let note = Note::new(1000, wallet.pk_hash(), &mut rng);
-        let commitment = note.commitment();
+        let _commitment = note.commitment();
 
-        // Create a mock encrypted note
-        let encrypted = wallet.viewing_key.encrypt_note(&note, &mut rng);
+        // Create a mock encrypted note using pk_hash (new encryption scheme)
+        let encryption_key = ViewingKey::from_pk_hash(wallet.pk_hash());
+        let encrypted = encryption_key.encrypt_note(&note, &mut rng);
 
-        // Try to decrypt
-        let decrypted = wallet.viewing_key.decrypt_note(&encrypted).unwrap();
+        // Try to decrypt using pk_hash
+        let decryption_key = ViewingKey::from_pk_hash(wallet.pk_hash());
+        let decrypted = decryption_key.decrypt_note(&encrypted).unwrap();
         assert_eq!(decrypted.value, 1000);
         assert_eq!(decrypted.recipient_pk_hash, wallet.pk_hash());
     }

@@ -63,7 +63,10 @@
       "Bash(~/.fly/bin/fly volumes list:*)",
       "Bash(~/.fly/bin/fly scale:*)",
       "Bash(~/.fly/bin/fly volumes destroy:*)",
-      "Bash(~/.fly/bin/fly volumes create:*)"
+      "Bash(~/.fly/bin/fly volumes create:*)",
+      "Bash(wc:*)",
+      "Bash(~/.fly/bin/fly machine stop:*)",
+      "Bash(~/.fly/bin/fly machine destroy:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
