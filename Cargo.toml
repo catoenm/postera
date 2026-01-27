@@ -12,10 +12,12 @@ fips204 = "0.4"
 # Hashing
 sha2 = "0.10"
 blake2 = "0.10"
+light-poseidon = "0.2"
 
-# zk-SNARKs (Groth16 on BLS12-381)
+# zk-SNARKs (Groth16 on BN254 for compatibility with circomlibjs/snarkjs)
 ark-groth16 = "0.4"
 ark-bls12-381 = "0.4"
+ark-bn254 = "0.4"
 ark-ff = "0.4"
 ark-ec = "0.4"
 ark-std = "0.4"

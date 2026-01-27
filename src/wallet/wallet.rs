@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
-use ark_bls12_381::Fr;
+use ark_bn254::Fr;
 
 use crate::core::{
     BindingSignature, OutputDescription, ShieldedBlock,

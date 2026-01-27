@@ -217,6 +217,14 @@ export default function Wallet() {
     setSendResult(null);
 
     try {
+      // Ensure proving keys are loaded (required for ZK proof generation)
+      if (!ShieldedWallet.isProverReady) {
+        setSendResult({ success: false, message: 'Loading ZK proving keys...' });
+        await ShieldedWallet.initialize(true, (msg) => {
+          setSendResult({ success: false, message: msg });
+        });
+      }
+
       // Parse amounts
       const amount = ShieldedWallet.parseAmount(sendAmount);
       const fee = ShieldedWallet.parseAmount(sendFee);

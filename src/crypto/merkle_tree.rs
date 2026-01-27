@@ -8,7 +8,7 @@
 //!
 //! Uses Poseidon hash for efficient verification in zk-SNARK circuits.
 
-use ark_bls12_381::Fr;
+use ark_bn254::Fr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -275,7 +275,7 @@ impl CommitmentWitness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_bls12_381::Fr;
+    use ark_bn254::Fr;
     use ark_ff::UniformRand;
     use ark_std::rand::SeedableRng;
     use ark_std::rand::rngs::StdRng;

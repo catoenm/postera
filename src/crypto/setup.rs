@@ -8,7 +8,7 @@
 //! using a multi-party computation ceremony to ensure no single party
 //! knows the toxic waste (trapdoor).
 
-use ark_bls12_381::Bls12_381;
+use ark_bn254::Bn254;
 use ark_groth16::Groth16;
 use ark_snark::SNARK;
 use ark_std::rand::{CryptoRng, RngCore};
@@ -29,12 +29,12 @@ use super::proof::{ProvingParams, VerifyingParams};
 pub fn generate_parameters<R: RngCore + CryptoRng>(rng: &mut R) -> Result<(ProvingParams, VerifyingParams), &'static str> {
     // Generate parameters for spend circuit
     let spend_circuit = SpendCircuit::dummy();
-    let (spend_pk, spend_vk) = Groth16::<Bls12_381>::circuit_specific_setup(spend_circuit, rng)
+    let (spend_pk, spend_vk) = Groth16::<Bn254>::circuit_specific_setup(spend_circuit, rng)
         .map_err(|_| "Failed to generate spend circuit parameters")?;
 
     // Generate parameters for output circuit
     let output_circuit = OutputCircuit::dummy();
-    let (output_pk, output_vk) = Groth16::<Bls12_381>::circuit_specific_setup(output_circuit, rng)
+    let (output_pk, output_vk) = Groth16::<Bn254>::circuit_specific_setup(output_circuit, rng)
         .map_err(|_| "Failed to generate output circuit parameters")?;
 
     let proving_params = ProvingParams {

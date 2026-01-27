@@ -8,7 +8,7 @@
 //! - Each note produces a unique nullifier
 //! - The same note always produces the same nullifier (prevents double-spend)
 
-use ark_bls12_381::Fr;
+use ark_bn254::Fr;
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
 use blake2::{Blake2s256, Digest};

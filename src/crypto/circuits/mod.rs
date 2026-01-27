@@ -15,7 +15,7 @@ pub use poseidon_gadget::{
     poseidon_hash_gadget, note_commitment_gadget, nullifier_gadget, merkle_hash_gadget,
 };
 
-use ark_bls12_381::Fr;
+use ark_bn254::Fr;
 use ark_ff::PrimeField;
 
 /// Convert bytes to field element.

@@ -6,7 +6,7 @@
 //! Public inputs: note_commitment, value_commitment_hash (as field elements)
 //! Private witness: value, recipient_pk_hash, randomness
 
-use ark_bls12_381::Fr;
+use ark_bn254::Fr;
 use ark_r1cs_std::{
     alloc::AllocVar,
     eq::EqGadget,

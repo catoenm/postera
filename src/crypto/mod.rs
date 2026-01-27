@@ -16,7 +16,7 @@ pub use signature::{sign, verify, Signature};
 pub use poseidon::{
     poseidon_hash, poseidon_hash_2, bytes32_to_field, field_to_bytes32,
     DOMAIN_NOTE_COMMITMENT, DOMAIN_VALUE_COMMITMENT_HASH, DOMAIN_NULLIFIER,
-    DOMAIN_MERKLE_EMPTY, DOMAIN_MERKLE_NODE, POSEIDON_CONFIG,
+    DOMAIN_MERKLE_EMPTY, DOMAIN_MERKLE_NODE, POSEIDON_CONFIG, POSEIDON_CONFIG_4,
 };
 pub use commitment::{NoteCommitment, ValueCommitment, commit_to_value, commit_to_note};
 pub use nullifier::{Nullifier, NullifierKey, derive_nullifier};

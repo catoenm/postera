@@ -3,7 +3,7 @@
 //! Uses Pedersen commitments on BLS12-381 for value commitments (homomorphic)
 //! and Poseidon for note commitments (efficient in circuits).
 
-use ark_bls12_381::{Fr, G1Projective as G1};
+use ark_bn254::{Fr, G1Projective as G1};
 use ark_ec::Group;
 use ark_ff::{Field, PrimeField, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};

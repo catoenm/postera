@@ -59,7 +59,11 @@
       "Bash(npm run export:spend-vkey:*)",
       "Bash(npm run export:output-vkey:*)",
       "Bash(grep:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(~/.fly/bin/fly volumes list:*)",
+      "Bash(~/.fly/bin/fly scale:*)",
+      "Bash(~/.fly/bin/fly volumes destroy:*)",
+      "Bash(~/.fly/bin/fly volumes create:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

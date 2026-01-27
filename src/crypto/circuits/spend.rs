@@ -8,7 +8,7 @@
 //! Public inputs: merkle_root, nullifier, value_commitment_hash (all as field elements)
 //! Private witness: value, pk_hash, randomness, nullifier_key, merkle_path, position
 
-use ark_bls12_381::Fr;
+use ark_bn254::Fr;
 use ark_r1cs_std::{
     alloc::AllocVar,
     boolean::Boolean,

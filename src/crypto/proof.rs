@@ -6,7 +6,7 @@
 //! - Verifying parameters for proof verification
 //! - Functions to create and verify proofs
 
-use ark_bls12_381::{Bls12_381, Fr};
+use ark_bn254::{Bn254, Fr};
 use ark_groth16::{
     prepare_verifying_key, Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey,
 };
@@ -26,14 +26,14 @@ pub struct ZkProof {
 
 impl ZkProof {
     /// Create from a Groth16 proof.
-    pub fn from_groth16_proof(proof: &Proof<Bls12_381>) -> Self {
+    pub fn from_groth16_proof(proof: &Proof<Bn254>) -> Self {
         let mut proof_data = Vec::new();
         proof.serialize_compressed(&mut proof_data).unwrap();
         Self { proof_data }
     }
 
     /// Convert to a Groth16 proof.
-    pub fn to_groth16_proof(&self) -> Result<Proof<Bls12_381>, &'static str> {
+    pub fn to_groth16_proof(&self) -> Result<Proof<Bn254>, &'static str> {
         Proof::deserialize_compressed(&self.proof_data[..])
             .map_err(|_| "Failed to deserialize proof")
     }
@@ -76,9 +76,9 @@ impl<'de> Deserialize<'de> for ZkProof {
 /// Parameters needed to generate proofs.
 pub struct ProvingParams {
     /// Spend circuit proving key.
-    pub spend_pk: ProvingKey<Bls12_381>,
+    pub spend_pk: ProvingKey<Bn254>,
     /// Output circuit proving key.
-    pub output_pk: ProvingKey<Bls12_381>,
+    pub output_pk: ProvingKey<Bn254>,
 }
 
 impl ProvingParams {
@@ -133,18 +133,18 @@ impl ProvingParams {
 /// Parameters needed to verify proofs.
 pub struct VerifyingParams {
     /// Prepared spend circuit verifying key.
-    pub spend_pvk: PreparedVerifyingKey<Bls12_381>,
+    pub spend_pvk: PreparedVerifyingKey<Bn254>,
     /// Prepared output circuit verifying key.
-    pub output_pvk: PreparedVerifyingKey<Bls12_381>,
+    pub output_pvk: PreparedVerifyingKey<Bn254>,
     /// Raw spend verifying key (for serialization).
-    spend_vk: VerifyingKey<Bls12_381>,
+    spend_vk: VerifyingKey<Bn254>,
     /// Raw output verifying key (for serialization).
-    output_vk: VerifyingKey<Bls12_381>,
+    output_vk: VerifyingKey<Bn254>,
 }
 
 impl VerifyingParams {
     /// Create from verifying keys.
-    pub fn new(spend_vk: VerifyingKey<Bls12_381>, output_vk: VerifyingKey<Bls12_381>) -> Self {
+    pub fn new(spend_vk: VerifyingKey<Bn254>, output_vk: VerifyingKey<Bn254>) -> Self {
         let spend_pvk = prepare_verifying_key(&spend_vk);
         let output_pvk = prepare_verifying_key(&output_vk);
         Self {
@@ -209,7 +209,7 @@ pub fn generate_spend_proof<R: RngCore + CryptoRng>(
     proving_params: &ProvingParams,
     rng: &mut R,
 ) -> Result<ZkProof, &'static str> {
-    let proof = Groth16::<Bls12_381>::prove(&proving_params.spend_pk, circuit, rng)
+    let proof = Groth16::<Bn254>::prove(&proving_params.spend_pk, circuit, rng)
         .map_err(|_| "Failed to generate spend proof")?;
 
     Ok(ZkProof::from_groth16_proof(&proof))
@@ -226,7 +226,7 @@ pub fn verify_spend_proof(
         Err(_) => return false,
     };
 
-    Groth16::<Bls12_381>::verify_with_processed_vk(
+    Groth16::<Bn254>::verify_with_processed_vk(
         &verifying_params.spend_pvk,
         public_inputs,
         &groth16_proof,
@@ -240,7 +240,7 @@ pub fn generate_output_proof<R: RngCore + CryptoRng>(
     proving_params: &ProvingParams,
     rng: &mut R,
 ) -> Result<ZkProof, &'static str> {
-    let proof = Groth16::<Bls12_381>::prove(&proving_params.output_pk, circuit, rng)
+    let proof = Groth16::<Bn254>::prove(&proving_params.output_pk, circuit, rng)
         .map_err(|_| "Failed to generate output proof")?;
 
     Ok(ZkProof::from_groth16_proof(&proof))
@@ -257,7 +257,7 @@ pub fn verify_output_proof(
         Err(_) => return false,
     };
 
-    Groth16::<Bls12_381>::verify_with_processed_vk(
+    Groth16::<Bn254>::verify_with_processed_vk(
         &verifying_params.output_pvk,
         public_inputs,
         &groth16_proof,

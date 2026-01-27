@@ -3,7 +3,7 @@
 //! This module provides Poseidon hash constraints that match the native
 //! implementation, ensuring consistency between proof generation and verification.
 
-use ark_bls12_381::Fr;
+use ark_bn254::Fr;
 use ark_crypto_primitives::sponge::{
     constraints::CryptographicSpongeVar,
     poseidon::constraints::PoseidonSpongeVar,

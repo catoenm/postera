@@ -3,7 +3,7 @@
 //! A note represents a private value owned by a recipient.
 //! Notes are encrypted on-chain so only the recipient can read them.
 
-use ark_bls12_381::Fr;
+use ark_bn254::Fr;
 use ark_ff::{PrimeField, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use blake2::{Blake2s256, Digest};
