@@ -238,6 +238,22 @@ async function createSpendDescription(
     position: note.position.toString(10),
   };
 
+  // DEBUG: Compute note commitment and compare
+  const { noteCommitment: computeCommitment } = await import('./poseidon');
+  const computedCommitment = computeCommitment(note.value, pkHashFe, randomnessFe);
+  const storedCommitment = bytes32ToBigint(hexToBytes(note.commitment));
+  console.log('=== SPEND DEBUG ===');
+  console.log('Note value:', note.value.toString());
+  console.log('pkHashFe:', pkHashFe.toString(16));
+  console.log('randomnessFe:', randomnessFe.toString(16));
+  console.log('Computed commitment:', computedCommitment.toString(16));
+  console.log('Stored commitment:', storedCommitment.toString(16));
+  console.log('Commitments match:', computedCommitment === storedCommitment);
+  console.log('Merkle root:', merkleRootFe.toString(16));
+  console.log('Position:', note.position.toString());
+  console.log('Path length:', witness.path.length);
+  console.log('===================');
+
   // Generate ZK proof
   const { proof } = await generateSpendProof(spendWitness);
   const proofBytes = proofToBytes(proof);

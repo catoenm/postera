@@ -57,6 +57,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/witness/:commitment", get(get_witness))
         .route("/witness/position/:position", get(get_witness_by_position))
         .route("/debug/commitments", get(debug_list_commitments))
+        .route("/debug/poseidon", get(debug_poseidon_test))
         // React app routes - serve index.html for SPA
         .route("/wallet", get(serve_index))
         .route("/wallet/*path", get(serve_index))
@@ -64,6 +65,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/explorer/*path", get(serve_index))
         // Static assets
         .nest_service("/assets", ServeDir::new("static/assets"))
+        // Circuit files (WASM and proving keys)
+        .nest_service("/circuits", ServeDir::new("static/circuits"))
         .with_state(state)
 }
 
@@ -805,6 +808,39 @@ async fn get_witness_by_position(
         root: hex::encode(root),
         path: merkle_path.auth_path.iter().map(|h| hex::encode(h)).collect(),
         position,
+    }))
+}
+
+/// Debug endpoint to test Poseidon hash compatibility.
+/// Returns the hash of inputs [1,2,3,4] for comparison with circomlibjs.
+async fn debug_poseidon_test() -> Json<serde_json::Value> {
+    use crate::crypto::poseidon::{poseidon_hash, field_to_bytes32, DOMAIN_NOTE_COMMITMENT};
+    use ark_bn254::Fr;
+    use light_poseidon::{Poseidon, PoseidonHasher};
+
+    // Test 1: Direct light-poseidon hash of [1,2,3,4]
+    let inputs = [Fr::from(1u64), Fr::from(2u64), Fr::from(3u64), Fr::from(4u64)];
+    let mut poseidon = Poseidon::<Fr>::new_circom(4).unwrap();
+    let direct_hash = poseidon.hash(&inputs).unwrap();
+    let direct_bytes = field_to_bytes32(&direct_hash);
+
+    // Test 2: Our poseidon_hash with domain separation (domain=1, then [2,3,4])
+    // This is: poseidon([1, 2, 3, 4]) with 1 as domain
+    let domain_hash = poseidon_hash(DOMAIN_NOTE_COMMITMENT, &[Fr::from(2u64), Fr::from(3u64), Fr::from(4u64)]);
+    let domain_bytes = field_to_bytes32(&domain_hash);
+
+    Json(serde_json::json!({
+        "test": "Poseidon compatibility",
+        "direct_hash_1234": {
+            "description": "poseidon([1,2,3,4]) - direct light-poseidon",
+            "bytes_le": direct_bytes.to_vec(),
+            "hex": hex::encode(direct_bytes),
+        },
+        "domain_hash_1_234": {
+            "description": "poseidon_hash(domain=1, [2,3,4]) - our wrapper",
+            "bytes_le": domain_bytes.to_vec(),
+            "hex": hex::encode(domain_bytes),
+        }
     }))
 }
 

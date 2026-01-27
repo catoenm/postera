@@ -1,6 +1,10 @@
 // Polyfills must be first
 import './polyfills'
 
+// Import test utilities (registers them on window)
+import './test-poseidon'
+import './test-prover'
+
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
