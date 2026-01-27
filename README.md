@@ -9,15 +9,16 @@ A privacy-focused cryptocurrency combining post-quantum cryptography with zero-k
 ## Features
 
 - **Post-Quantum Signatures**: Uses ML-DSA-65 (FIPS 204, formerly CRYSTALS-Dilithium), a lattice-based signature scheme standardized by NIST
-- **Shielded Transactions**: Privacy model using zk-SNARKs (Groth16 on BLS12-381) - _proof generation in development_
+- **Shielded Transactions**: Privacy model using zk-SNARKs (Groth16 on BN254) with real proof generation
+- **Browser-Based Proving**: Client-side ZK proof generation using snarkjs and circom circuits
 - **Note-Based Model**: UTXO-style notes with commitments, nullifiers, and encrypted payloads (similar to Zcash)
 - **Viewing Keys**: Scan the blockchain for incoming transactions without spending ability
 - **Proof of Work Consensus**: Dynamic difficulty adjustment targeting 10-second block times
 - **Full Node**: Run a node with REST API and web explorer
-- **Web Wallet**: React-based wallet with client-side key generation and message signing
+- **Web Wallet**: React-based wallet with client-side key generation, shielded transactions, and ZK proving
 - **P2P Networking**: Peer discovery, block broadcasting, and transaction relay
 - **Persistent Storage**: SledDB-backed blockchain persistence
-- **Docker & Fly.io Deployment**: Production-ready containerization and cloud deployment
+- **Live Network**: Join the public network at [postera.network](https://postera.network)
 
 ## Installation
 
@@ -59,20 +60,28 @@ This generates a wallet with:
 ### Run a Node
 
 ```bash
-# Start a node on default port 8333
+# Join the live network
+./target/release/postera node --peer https://postera.network
+
+# Join and mine to your wallet
+./target/release/postera node --mine wallet.json --peer https://postera.network
+
+# Start a standalone node on default port 8333
 ./target/release/postera node
-
-# Start with mining enabled
-./target/release/postera node --mine <your-address>
-
-# Connect to peers
-./target/release/postera node --peer http://peer1:8333 --peer http://peer2:8333
 ```
 
 The node exposes:
 
 - REST API at `http://localhost:8333`
 - Block Explorer at `http://localhost:8333/explorer`
+- Web Wallet at `http://localhost:8333/wallet`
+
+### Live Network
+
+The public network is available at:
+- **Explorer**: https://postera.network/explorer
+- **Wallet**: https://postera.network/wallet
+- **API**: https://postera.network/chain/info
 
 ### Web Wallet
 
@@ -99,10 +108,14 @@ With shielded transactions, balances are computed by scanning the blockchain for
 ./target/release/postera balance -w my-wallet.json
 ```
 
-### Send Transaction (Coming Soon)
+### Send Shielded Transaction
 
-Shielded transactions require ZK proof generation. CLI support in development:
+Use the web wallet at https://postera.network/wallet to send shielded transactions. The wallet:
+1. Generates ZK proofs client-side using snarkjs
+2. Encrypts notes so only recipients can decrypt them
+3. Broadcasts the transaction to the network
 
+CLI support coming soon:
 ```bash
 ./target/release/postera send <recipient-pk-hash> <amount> -w my-wallet.json
 ```
@@ -146,7 +159,8 @@ src/
   crypto/           Cryptographic primitives
     keys.rs         ML-DSA-65 keypair generation
     signature.rs    Post-quantum signatures
-    commitment.rs   Pedersen commitments for notes and values
+    poseidon.rs     Poseidon hash (circomlib-compatible via light-poseidon)
+    commitment.rs   Note and value commitments
     nullifier.rs    Nullifier derivation (prevents double-spending)
     note.rs         Note encryption/decryption with viewing keys
     merkle_tree.rs  Commitment tree for membership proofs
@@ -162,12 +176,19 @@ src/
   network/          REST API, P2P sync, and peer discovery
   storage/          SledDB persistence
   wallet/           Wallet generation and shielded transaction building
-  explorer/         Web-based block explorer
+
+circuits/           Circom circuits for browser proving
+  spend.circom      Spend proof circuit
+  output.circom     Output proof circuit
 
 wallet/             React web wallet application
   src/
     crypto.ts       Client-side ML-DSA-65 key generation and signing
-    Wallet.tsx      Wallet UI (create, import, sign messages)
+    poseidon.ts     Poseidon hash (circomlib-compatible)
+    prover.ts       snarkjs proof generation
+    shielded-wallet.ts  Shielded wallet with note scanning
+    transaction-builder.ts  Build shielded transactions
+    Wallet.tsx      Wallet UI with send/receive
     Explorer.tsx    Block explorer UI
 ```
 
@@ -212,16 +233,17 @@ Postera uses ML-DSA-65 (FIPS 204), the NIST-standardized version of CRYSTALS-Dil
 
 ### Zero-Knowledge Proofs (Groth16)
 
-Shielded transactions use zk-SNARKs on the BLS12-381 curve:
+Shielded transactions use zk-SNARKs on the BN254 curve:
 
-| Component         | Description                         |
-| ----------------- | ----------------------------------- |
-| Proving System    | Groth16 (constant-size proofs)      |
-| Curve             | BLS12-381 (128-bit security)        |
-| Commitment Scheme | Pedersen commitments                |
-| Encryption        | ChaCha20-Poly1305 (note encryption) |
+| Component         | Description                                     |
+| ----------------- | ----------------------------------------------- |
+| Proving System    | Groth16 (constant-size proofs)                  |
+| Curve             | BN254 (compatible with snarkjs/circom)          |
+| Hash Function     | Poseidon (ZK-SNARK friendly, circomlib-compatible) |
+| Commitment Scheme | Poseidon-based note commitments                 |
+| Encryption        | ChaCha20-Poly1305 (note encryption)             |
 
-> **Note**: The ZK circuit infrastructure (R1CS constraints, arkworks integration) is implemented, but proof generation is not yet wired into transaction creation. Proofs are currently placeholder values.
+The browser wallet generates real ZK proofs using snarkjs with pre-compiled circom circuits. Proofs are verified on-chain by the Rust node using arkworks.
 
 ## Privacy Model
 

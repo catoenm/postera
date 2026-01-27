@@ -154,8 +154,7 @@ export async function createShieldedTransaction(
   const totalSteps = spendNotes.length + outputParams.length;
   let currentStep = 0;
 
-  // Generate spend proofs sequentially to show progress for each
-  progress(`Creating spend proofs (0/${spendNotes.length})...`);
+  // Generate spend proofs sequentially with progress
   const spends: SpendDescription[] = [];
   for (let i = 0; i < spendNotes.length; i++) {
     currentStep++;
@@ -164,8 +163,7 @@ export async function createShieldedTransaction(
     spends.push(spend);
   }
 
-  // Generate output proofs sequentially to show progress
-  progress(`Creating output proofs (0/${outputParams.length})...`);
+  // Generate output proofs sequentially with progress
   const outputs: OutputDescription[] = [];
   for (let i = 0; i < outputParams.length; i++) {
     currentStep++;
