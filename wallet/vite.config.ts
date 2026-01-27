@@ -1,26 +1,25 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { nodePolyfills } from 'vite-plugin-node-polyfills'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    nodePolyfills({
+      include: ['buffer', 'process'],
+      globals: {
+        Buffer: true,
+        global: true,
+        process: true,
+      },
+    }),
+  ],
   base: '/',
-  // Polyfill Buffer for browser
-  define: {
-    'global': 'globalThis',
-  },
   build: {
     outDir: '../static',
     emptyOutDir: true,
     // Increase chunk size warning limit for large ZK proving keys
     chunkSizeWarningLimit: 5000,
-  },
-  // Optimize dependencies for snarkjs
-  optimizeDeps: {
-    esbuildOptions: {
-      define: {
-        global: 'globalThis',
-      },
-    },
   },
   server: {
     proxy: {

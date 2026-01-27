@@ -67,9 +67,15 @@ export default function Wallet() {
   // Initialize shielded wallet when wallet is loaded
   useEffect(() => {
     if (wallet) {
-      const sw = ShieldedWallet.fromHex(wallet.secret_key, wallet.public_key);
-      setShieldedWallet(sw);
-      updateBalanceDisplay(sw);
+      const initializeWallet = async () => {
+        // Initialize Poseidon hash before creating wallet (required for nullifier derivation)
+        await ShieldedWallet.initialize(false, (msg) => setScanStatus(msg));
+
+        const sw = ShieldedWallet.fromHex(wallet.secret_key, wallet.public_key);
+        setShieldedWallet(sw);
+        updateBalanceDisplay(sw);
+      };
+      initializeWallet().catch(console.error);
     }
   }, [wallet]);
 

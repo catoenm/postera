@@ -42,3 +42,11 @@ your-data/
 *powersOfTau*
 pot*.ptau
 powersoftau/
+
+# Circuits build artifacts
+circuits/node_modules/
+circuits/build/
+*.r1cs
+*.sym
+*.zkey
+circuits/**/*.wasm
