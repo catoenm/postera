@@ -113,10 +113,10 @@ impl<'de> Deserialize<'de> for ValueCommitment {
 }
 
 /// Generator points for Pedersen commitment.
-/// These are fixed points on BLS12-381 derived from nothing-up-my-sleeve values.
+/// These are fixed points on BN254 derived from nothing-up-my-sleeve values.
 lazy_static::lazy_static! {
     /// Generator G for value component: HASH_TO_CURVE("Postera_ValueCommitment_G")
-    static ref VALUE_GENERATOR_G: G1 = {
+    pub static ref VALUE_GENERATOR_G: G1 = {
         // Use a hash-to-group derivation for the value generator
         let mut hasher = Blake2s256::new();
         hasher.update(b"Postera_ValueCommitment_G");
@@ -126,7 +126,7 @@ lazy_static::lazy_static! {
     };
 
     /// Generator H for randomness component: HASH_TO_CURVE("Postera_ValueCommitment_H")
-    static ref VALUE_GENERATOR_H: G1 = {
+    pub static ref VALUE_GENERATOR_H: G1 = {
         let mut hasher = Blake2s256::new();
         hasher.update(b"Postera_ValueCommitment_H");
         let hash = hasher.finalize();

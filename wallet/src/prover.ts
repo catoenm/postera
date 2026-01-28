@@ -37,21 +37,41 @@ export function setCircuitBasePath(path: string): void {
 }
 
 /**
- * Load proving keys from the server.
+ * Load a file as ArrayBuffer, supporting both browser (fetch) and Node.js (fs).
+ */
+async function loadFile(path: string): Promise<ArrayBuffer> {
+  // Check if we're in Node.js and the path is a local file
+  // @ts-ignore - process may not exist in browser
+  const isNode = typeof globalThis.process !== 'undefined' && globalThis.process.versions?.node;
+
+  if (isNode && !path.startsWith('http')) {
+    // Dynamic import fs for Node.js (won't be bundled for browser)
+    // @ts-ignore - dynamic import for Node.js only
+    const fs = await import(/* @vite-ignore */ 'fs');
+    const buffer = fs.readFileSync(path);
+    return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+  }
+
+  // Browser or HTTP URL - use fetch
+  const response = await fetch(path);
+  if (!response.ok) {
+    throw new Error(`Failed to load ${path}: ${response.status}`);
+  }
+  return response.arrayBuffer();
+}
+
+/**
+ * Load proving keys from the server or filesystem.
  * Should be called once when the wallet initializes.
  */
 export async function loadProvingKeys(): Promise<void> {
-  const [spendResponse, outputResponse] = await Promise.all([
-    fetch(`${circuitBasePath}/spend_final.zkey`),
-    fetch(`${circuitBasePath}/output_final.zkey`),
+  const [spendBuffer, outputBuffer] = await Promise.all([
+    loadFile(`${circuitBasePath}/spend_final.zkey`),
+    loadFile(`${circuitBasePath}/output_final.zkey`),
   ]);
 
-  if (!spendResponse.ok || !outputResponse.ok) {
-    throw new Error('Failed to load proving keys');
-  }
-
-  spendZkey = await spendResponse.arrayBuffer();
-  outputZkey = await outputResponse.arrayBuffer();
+  spendZkey = spendBuffer;
+  outputZkey = outputBuffer;
 }
 
 /**

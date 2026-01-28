@@ -16,6 +16,7 @@ import {
 import { hexToBytes, bytesToHex } from './crypto';
 import { getOutputsSince, checkNullifiers } from './api';
 import { loadProvingKeys, areProvingKeysLoaded } from './prover';
+import { initBindingCrypto, isBindingCryptoReady } from './binding';
 import type { WalletNote, ShieldedState, EncryptedOutput } from './types';
 
 /** Whether cryptographic primitives have been initialized */
@@ -82,6 +83,12 @@ export class ShieldedWallet {
       onProgress?.('Loading ZK proving keys (~100-200MB)...');
       await loadProvingKeys();
       onProgress?.('Proving keys loaded.');
+    }
+
+    if (loadProver && !isBindingCryptoReady()) {
+      onProgress?.('Initializing binding crypto (BN254)...');
+      await initBindingCrypto();
+      onProgress?.('Binding crypto ready.');
     }
   }
 

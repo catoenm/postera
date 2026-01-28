@@ -5,17 +5,14 @@
 //! roots are visible.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use crate::consensus::{
     calculate_next_difficulty, should_adjust_difficulty, ADJUSTMENT_INTERVAL, MIN_DIFFICULTY,
 };
 use crate::crypto::{
-    commitment::NoteCommitment,
-    note::{compute_pk_hash, EncryptedNote, Note, ViewingKey},
+    note::{Note, ViewingKey},
     proof::VerifyingParams,
-    Address, KeyPair,
 };
 use crate::storage::Database;
 
@@ -76,23 +73,117 @@ impl ShieldedBlockchain {
     }
 
     /// Open a persisted blockchain from disk, or create a new one.
-    /// For now, this is a simplified implementation that creates a fresh chain.
-    pub fn open(_db_path: &str, difficulty: u64) -> Result<Self, BlockError> {
-        // TODO: Implement actual persistence with sled
-        // For now, create a fresh chain with a dummy genesis
+    ///
+    /// If the database contains existing blocks, they are loaded and the state
+    /// is rebuilt by replaying all blocks from genesis.
+    pub fn open(db_path: &str, difficulty: u64) -> Result<Self, BlockchainError> {
         use crate::crypto::commitment::NoteCommitment;
         use crate::crypto::note::EncryptedNote;
 
-        let genesis_coinbase = CoinbaseTransaction::new(
-            NoteCommitment([0u8; 32]),
-            EncryptedNote {
-                ciphertext: vec![0; 64],
-                ephemeral_pk: vec![0; 32],
-            },
-            BLOCK_REWARD,
-            0,
-        );
-        Ok(Self::new(difficulty, genesis_coinbase))
+        // Open the database
+        let db = Database::open(db_path)
+            .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+        let db = Arc::new(db);
+
+        // Check if we have existing blocks
+        let stored_height = db
+            .get_height()
+            .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+
+        if let Some(height) = stored_height {
+            // Load existing chain
+            tracing::info!("Loading blockchain from disk (height: {})", height);
+
+            let mut blocks = HashMap::new();
+            let mut height_index = Vec::new();
+            let mut state = ShieldedState::new();
+
+            // Load all blocks and rebuild state
+            for h in 0..=height {
+                let block = db
+                    .load_block_by_height(h)
+                    .map_err(|e| BlockchainError::StorageError(e.to_string()))?
+                    .ok_or_else(|| {
+                        BlockchainError::StorageError(format!("Missing block at height {}", h))
+                    })?;
+
+                let hash = block.hash();
+
+                // Apply transactions to state
+                for tx in &block.transactions {
+                    state.apply_transaction(tx);
+                }
+                state.apply_coinbase(&block.coinbase);
+
+                blocks.insert(hash, block);
+                height_index.push(hash);
+            }
+
+            // Load difficulty from metadata or use last block's difficulty
+            let current_difficulty = db
+                .get_metadata("difficulty")
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(difficulty);
+
+            tracing::info!(
+                "Blockchain loaded: height={}, commitments={}, nullifiers={}",
+                height,
+                state.commitment_count(),
+                state.nullifier_count()
+            );
+
+            Ok(Self {
+                blocks,
+                height_index,
+                state,
+                difficulty: current_difficulty,
+                db: Some(db),
+                orphans: HashMap::new(),
+                verifying_params: None,
+            })
+        } else {
+            // Create a fresh chain with a dummy genesis
+            tracing::info!("Creating new blockchain");
+
+            let genesis_coinbase = CoinbaseTransaction::new(
+                NoteCommitment([0u8; 32]),
+                EncryptedNote {
+                    ciphertext: vec![0; 64],
+                    ephemeral_pk: vec![0; 32],
+                },
+                BLOCK_REWARD,
+                0,
+            );
+
+            let genesis = ShieldedBlock::genesis(difficulty, genesis_coinbase.clone());
+            let genesis_hash = genesis.hash();
+
+            // Save genesis to database
+            db.save_block(&genesis, 0)
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+            db.set_metadata("difficulty", &difficulty.to_string())
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+            db.flush()
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+
+            let mut blocks = HashMap::new();
+            blocks.insert(genesis_hash, genesis);
+
+            // Initialize state with genesis coinbase
+            let mut state = ShieldedState::new();
+            state.apply_coinbase(&genesis_coinbase);
+
+            Ok(Self {
+                blocks,
+                height_index: vec![genesis_hash],
+                state,
+                difficulty,
+                db: Some(db),
+                orphans: HashMap::new(),
+                verifying_params: None,
+            })
+        }
     }
 
     /// Create a genesis coinbase for a miner.
@@ -267,26 +358,42 @@ impl ShieldedBlockchain {
         // Validate first
         self.validate_block(&block)?;
 
+        let hash = block.hash();
+        let new_height = self.height_index.len() as u64;
+
+        // Persist block and nullifiers if we have a database
+        if let Some(ref db) = self.db {
+            // Save block
+            db.save_block(&block, new_height)
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+
+            // Save nullifiers from this block
+            for tx in &block.transactions {
+                for spend in &tx.spends {
+                    db.save_nullifier(&spend.nullifier.to_bytes())
+                        .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+                }
+            }
+
+            // Update metadata
+            db.set_metadata("difficulty", &block.header.difficulty.to_string())
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+
+            // Flush to ensure durability
+            db.flush()
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+        }
+
         // Apply transactions to state
         for tx in &block.transactions {
             self.state.apply_transaction(tx);
         }
         self.state.apply_coinbase(&block.coinbase);
 
-        // Add to chain
-        let hash = block.hash();
-        let new_height = self.height_index.len() as u64;
-
         // Update difficulty
         self.difficulty = block.header.difficulty;
 
-        // Persist if we have a database
-        if let Some(ref db) = self.db {
-            // Note: storage would need updating for shielded blocks
-            db.set_metadata("difficulty", &self.difficulty.to_string())
-                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
-        }
-
+        // Add to in-memory structures
         self.blocks.insert(hash, block);
         self.height_index.push(hash);
 
@@ -411,12 +518,44 @@ impl ShieldedBlockchain {
 
         // Add new tip to blocks
         let new_tip_hash = new_tip.hash();
-        self.blocks.insert(new_tip_hash, new_tip);
+        self.blocks.insert(new_tip_hash, new_tip.clone());
 
         // Switch to new chain
         self.state = new_state;
-        self.height_index = new_height_index;
+        self.height_index = new_height_index.clone();
         self.difficulty = new_difficulty;
+
+        // Persist the reorganized chain if we have a database
+        if let Some(ref db) = self.db {
+            tracing::info!("Persisting chain reorganization (new height: {})", new_height_index.len() - 1);
+
+            // Clear nullifiers and rebuild from new chain
+            db.clear_nullifiers()
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+
+            // Re-persist all blocks in the new chain
+            for (height, hash) in new_height_index.iter().enumerate() {
+                if let Some(block) = self.blocks.get(hash) {
+                    db.save_block(block, height as u64)
+                        .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+
+                    // Save nullifiers from this block
+                    for tx in &block.transactions {
+                        for spend in &tx.spends {
+                            db.save_nullifier(&spend.nullifier.to_bytes())
+                                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+                        }
+                    }
+                }
+            }
+
+            // Update metadata
+            db.set_metadata("difficulty", &new_difficulty.to_string())
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+
+            db.flush()
+                .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+        }
 
         Ok(())
     }
@@ -558,7 +697,7 @@ pub enum BlockchainError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::note::ViewingKey;
+    use crate::crypto::note::{compute_pk_hash, ViewingKey};
 
     fn test_viewing_key() -> ViewingKey {
         ViewingKey::new(b"test_miner_key")
@@ -620,5 +759,78 @@ mod tests {
 
         // Commitment root should not be empty
         assert_ne!(chain.commitment_root(), [0u8; 32]);
+    }
+
+    #[test]
+    fn test_persistence_roundtrip() {
+        use tempfile::tempdir;
+
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_blockchain");
+        let db_path_str = db_path.to_str().unwrap();
+
+        let genesis_hash;
+        let genesis_commitment_root;
+
+        // Create and persist a blockchain
+        {
+            let chain = ShieldedBlockchain::open(db_path_str, MIN_DIFFICULTY).unwrap();
+            assert_eq!(chain.height(), 0);
+            genesis_hash = chain.latest_hash();
+            genesis_commitment_root = chain.commitment_root();
+        }
+
+        // Reopen and verify data persisted
+        {
+            let chain = ShieldedBlockchain::open(db_path_str, MIN_DIFFICULTY).unwrap();
+            assert_eq!(chain.height(), 0);
+            assert_eq!(chain.latest_hash(), genesis_hash);
+            assert_eq!(chain.commitment_root(), genesis_commitment_root);
+            assert_eq!(chain.commitment_count(), 1);
+        }
+    }
+
+    #[test]
+    fn test_persistence_with_blocks() {
+        use tempfile::tempdir;
+        use crate::consensus::mine_block;
+
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_blockchain_blocks");
+        let db_path_str = db_path.to_str().unwrap();
+
+        let vk = test_viewing_key();
+        let pk_hash = test_pk_hash();
+
+        let block1_hash;
+        let final_commitment_count;
+
+        // Create blockchain, mine a block, persist
+        {
+            let mut chain = ShieldedBlockchain::open(db_path_str, MIN_DIFFICULTY).unwrap();
+            assert_eq!(chain.height(), 0);
+
+            // Create and mine a block
+            let mut block = chain.create_block_template(pk_hash, &vk, vec![]);
+            mine_block(&mut block);
+
+            chain.add_block(block.clone()).unwrap();
+            assert_eq!(chain.height(), 1);
+
+            block1_hash = block.hash();
+            final_commitment_count = chain.commitment_count();
+        }
+
+        // Reopen and verify blocks persisted
+        {
+            let chain = ShieldedBlockchain::open(db_path_str, MIN_DIFFICULTY).unwrap();
+            assert_eq!(chain.height(), 1);
+            assert_eq!(chain.latest_hash(), block1_hash);
+            assert_eq!(chain.commitment_count(), final_commitment_count);
+
+            // Verify we can get the block by height
+            let loaded_block = chain.get_block_by_height(1).unwrap();
+            assert_eq!(loaded_block.hash(), block1_hash);
+        }
     }
 }

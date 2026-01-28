@@ -69,7 +69,16 @@
       "Bash(~/.fly/bin/fly machine destroy:*)",
       "Bash(~/.fly/bin/fly logs:*)",
       "Bash(~/.fly/bin/fly machine restart:*)",
-      "Bash(dig:*)"
+      "Bash(dig:*)",
+      "Bash(pgrep:*)",
+      "Bash(node -e:*)",
+      "Bash(brew install:*)",
+      "Bash(npm search:*)",
+      "Bash(fly machines list:*)",
+      "Bash(npx vite-node:*)",
+      "Bash(API_BASE=http://localhost:8333 npx vite-node:*)",
+      "Bash(CIRCUIT_PATH=file:///Users/mitchell.catoen/Documents/workspace/quantum-resistent-btc/wallet/public/circuits API_BASE=http://localhost:8333 npx vite-node:*)",
+      "Bash(CIRCUIT_PATH=./public/circuits API_BASE=http://localhost:8333 npx vite-node:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

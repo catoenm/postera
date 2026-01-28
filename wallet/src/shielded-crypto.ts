@@ -169,14 +169,17 @@ export interface EncryptedNote {
 /**
  * Encrypt a note so only the recipient can decrypt it.
  * Uses ChaCha20-Poly1305 with:
- * - Key: derived from viewing key and ephemeral public key
+ * - Key: derived from recipient's pk_hash and ephemeral public key
  * - Nonce: first 12 bytes of ephemeral public key
+ *
+ * The recipient can decrypt because they know their own pk_hash
+ * (derived from their public key).
  */
 export function encryptNote(
   value: bigint,
   pkHash: Uint8Array,
   randomness: Uint8Array,
-  viewingKey: Uint8Array
+  _viewingKey: Uint8Array // deprecated - use pkHash for encryption
 ): EncryptedNote {
   // Generate ephemeral randomness
   const ephemeralSecret = new Uint8Array(32);
@@ -185,8 +188,9 @@ export function encryptNote(
   // Derive ephemeral public key
   const ephemeralPk = deriveEphemeralPk(ephemeralSecret);
 
-  // Derive encryption key
-  const encryptionKey = deriveEncryptionKey(viewingKey, ephemeralPk);
+  // Derive encryption key using RECIPIENT'S pk_hash (not sender's viewing key)
+  // This allows the recipient to decrypt using their own pk_hash
+  const encryptionKey = deriveEncryptionKey(pkHash, ephemeralPk);
 
   // Use first 12 bytes of ephemeral_pk as nonce
   const nonce = ephemeralPk.slice(0, 12);

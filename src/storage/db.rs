@@ -8,12 +8,14 @@ use crate::crypto::Address;
 /// Uses separate trees for different data types:
 /// - blocks: hash -> block data
 /// - block_heights: height -> hash
+/// - nullifiers: nullifier -> () (existence check)
 /// - accounts: address -> account data
 /// - metadata: key -> value
 pub struct Database {
     db: sled::Db,
     blocks: sled::Tree,
     block_heights: sled::Tree,
+    nullifiers: sled::Tree,
     accounts: sled::Tree,
     metadata: sled::Tree,
 }
@@ -24,6 +26,7 @@ impl Database {
         let db = sled::open(path)?;
         let blocks = db.open_tree("blocks")?;
         let block_heights = db.open_tree("block_heights")?;
+        let nullifiers = db.open_tree("nullifiers")?;
         let accounts = db.open_tree("accounts")?;
         let metadata = db.open_tree("metadata")?;
 
@@ -31,6 +34,7 @@ impl Database {
             db,
             blocks,
             block_heights,
+            nullifiers,
             accounts,
             metadata,
         })
@@ -42,6 +46,7 @@ impl Database {
         let db = config.open()?;
         let blocks = db.open_tree("blocks")?;
         let block_heights = db.open_tree("block_heights")?;
+        let nullifiers = db.open_tree("nullifiers")?;
         let accounts = db.open_tree("accounts")?;
         let metadata = db.open_tree("metadata")?;
 
@@ -49,6 +54,7 @@ impl Database {
             db,
             blocks,
             block_heights,
+            nullifiers,
             accounts,
             metadata,
         })
@@ -106,6 +112,59 @@ impl Database {
             }
             None => Ok(None),
         }
+    }
+
+    /// Save a nullifier to the database.
+    pub fn save_nullifier(&self, nullifier: &[u8; 32]) -> Result<(), DatabaseError> {
+        self.nullifiers.insert(nullifier, &[])?;
+        Ok(())
+    }
+
+    /// Check if a nullifier exists in the database.
+    pub fn has_nullifier(&self, nullifier: &[u8; 32]) -> Result<bool, DatabaseError> {
+        Ok(self.nullifiers.contains_key(nullifier)?)
+    }
+
+    /// Load all nullifiers from the database.
+    pub fn load_all_nullifiers(&self) -> Result<Vec<[u8; 32]>, DatabaseError> {
+        let mut nullifiers = Vec::new();
+        for item in self.nullifiers.iter() {
+            let (key, _) = item?;
+            let nf: [u8; 32] = key
+                .as_ref()
+                .try_into()
+                .map_err(|_| DatabaseError::InvalidData("invalid nullifier length".into()))?;
+            nullifiers.push(nf);
+        }
+        Ok(nullifiers)
+    }
+
+    /// Get the count of stored nullifiers.
+    pub fn nullifier_count(&self) -> Result<u64, DatabaseError> {
+        Ok(self.nullifiers.len() as u64)
+    }
+
+    /// Clear all nullifiers (used during reorg).
+    pub fn clear_nullifiers(&self) -> Result<(), DatabaseError> {
+        self.nullifiers.clear()?;
+        Ok(())
+    }
+
+    /// Remove blocks from a given height onwards (used during reorg).
+    pub fn remove_blocks_from(&self, height: u64) -> Result<Vec<ShieldedBlock>, DatabaseError> {
+        let mut removed = Vec::new();
+        let current_height = self.get_height()?.unwrap_or(0);
+
+        for h in height..=current_height {
+            if let Some(block) = self.load_block_by_height(h)? {
+                removed.push(block);
+            }
+            // Remove height index
+            self.block_heights.remove(&h.to_be_bytes())?;
+        }
+
+        // Note: We don't remove blocks by hash since they might be needed for orphan processing
+        Ok(removed)
     }
 
     /// Save an account state.

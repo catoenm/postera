@@ -9,6 +9,7 @@ pub mod merkle_tree;
 pub mod proof;
 pub mod setup;
 pub mod circuits;
+pub mod binding;
 
 pub use keys::KeyPair;
 pub use address::Address;

@@ -9,6 +9,7 @@ import {
   computeNoteCommitment,
   encryptNote,
   generateRandomness,
+  deriveViewingKey,
 } from './shielded-crypto';
 import { sign, hexToBytes, bytesToHex } from './crypto';
 import { getWitnessByPosition } from './api';
@@ -26,6 +27,10 @@ import {
   DOMAIN_VALUE_COMMITMENT_HASH,
   poseidonHash,
 } from './poseidon';
+import {
+  BindingContext,
+  serializeCommitment,
+} from './binding';
 import type { WalletNote, WitnessResponse } from './types';
 
 /**
@@ -88,17 +93,11 @@ export interface TransactionParams {
 }
 
 /**
- * Compute a value commitment hash for use in circuits.
- * This is a placeholder - real value commitments use Pedersen.
+ * Compute a value commitment hash for use in ZK circuits.
+ * This is used as a public input to bind the value to the proof.
  */
 function computeValueCommitmentHash(value: bigint): bigint {
-  // For now, use a simple hash of the value
-  // In production, this would be the hash of a Pedersen commitment
   return poseidonHash(DOMAIN_VALUE_COMMITMENT_HASH, [value]);
-}
-
-function createPlaceholderBindingSignature(): string {
-  return bytesToHex(new Uint8Array(64));
 }
 
 function toByteArray(bytes: Uint8Array): number[] {
@@ -151,6 +150,10 @@ export async function createShieldedTransaction(
     });
   }
 
+  // Initialize binding context for tracking value commitments
+  const bindingCtx = new BindingContext();
+  bindingCtx.setFee(fee);
+
   const totalSteps = spendNotes.length + outputParams.length;
   let currentStep = 0;
 
@@ -159,9 +162,22 @@ export async function createShieldedTransaction(
   for (let i = 0; i < spendNotes.length; i++) {
     currentStep++;
     progress(`Creating spend proof ${i + 1}/${spendNotes.length} (step ${currentStep}/${totalSteps})...`);
-    const spend = await createSpendDescription(spendNotes[i], secretKey, publicKey);
+
+    // Create Pedersen value commitment for this spend
+    const valueCommit = bindingCtx.addSpend(spendNotes[i].value);
+    const valueCommitBytes = serializeCommitment(valueCommit);
+
+    const spend = await createSpendDescription(
+      spendNotes[i],
+      secretKey,
+      publicKey,
+      valueCommitBytes
+    );
     spends.push(spend);
   }
+
+  // Derive viewing key for note encryption
+  const viewingKey = deriveViewingKey(secretKey);
 
   // Generate output proofs sequentially with progress
   const outputs: OutputDescription[] = [];
@@ -170,18 +186,37 @@ export async function createShieldedTransaction(
     const isChange = i === outputParams.length - 1 && change > 0n;
     const label = isChange ? 'change' : `recipient ${i + 1}`;
     progress(`Creating output proof for ${label} (step ${currentStep}/${totalSteps})...`);
-    const output = await createOutputDescription(outputParams[i].pkHash, outputParams[i].amount);
+
+    // Create Pedersen value commitment for this output
+    const valueCommit = bindingCtx.addOutput(outputParams[i].amount);
+    const valueCommitBytes = serializeCommitment(valueCommit);
+
+    const output = await createOutputDescription(
+      outputParams[i].pkHash,
+      outputParams[i].amount,
+      viewingKey,
+      valueCommitBytes
+    );
     outputs.push(output);
   }
 
-  progress('Finalizing transaction...');
+  progress('Creating binding signature...');
+
+  // Collect nullifiers and output commitments for binding message
+  const nullifiers = spends.map(s => new Uint8Array(s.nullifier));
+  const outputCommitments = outputs.map(o => new Uint8Array(o.note_commitment));
+
+  // Create binding signature
+  const bindingSig = bindingCtx.createSignature(nullifiers, outputCommitments);
+
+  progress('Transaction complete.');
 
   return {
     spends,
     outputs,
     fee: Number(fee),
     binding_sig: {
-      signature: createPlaceholderBindingSignature(),
+      signature: bytesToHex(bindingSig),
     },
   };
 }
@@ -191,7 +226,8 @@ const TREE_DEPTH = 32;
 async function createSpendDescription(
   note: WalletNote,
   secretKey: Uint8Array,
-  publicKey: Uint8Array
+  publicKey: Uint8Array,
+  valueCommitmentBytes: Uint8Array
 ): Promise<SpendDescription> {
   // Get Merkle witness from server
   let witness: WitnessResponse;
@@ -205,10 +241,12 @@ async function createSpendDescription(
   const nullifierHex = note.nullifier!;
   const nullifierBytes = hexToBytes(nullifierHex);
 
-  // Compute value commitment hash for the circuit
+  // Use the provided Pedersen value commitment
+  const valueCommitmentHex = bytesToHex(valueCommitmentBytes);
+
+  // Compute value commitment hash for the ZK circuit public input
   const valueCommitmentHashFe = computeValueCommitmentHash(note.value);
   const valueCommitmentHashBytes = bigintToBytes32(valueCommitmentHashFe);
-  const valueCommitmentHex = bytesToHex(valueCommitmentHashBytes);
 
   // Convert note data to field elements for the witness
   const merkleRootFe = bytes32ToBigint(hexToBytes(witness.root));
@@ -290,7 +328,9 @@ async function createSpendDescription(
 
 async function createOutputDescription(
   recipientPkHashHex: string,
-  amount: bigint
+  amount: bigint,
+  viewingKey: Uint8Array,
+  valueCommitmentBytes: Uint8Array
 ): Promise<OutputDescription> {
   const pkHash = hexToBytes(recipientPkHashHex);
   const randomness = generateRandomness();
@@ -299,10 +339,11 @@ async function createOutputDescription(
   const commitment = computeNoteCommitment(amount, pkHash, randomness);
   const noteCommitmentFe = bytes32ToBigint(commitment);
 
-  // Compute value commitment hash for the circuit
+  // Use the provided Pedersen value commitment
+  const valueCommitmentHex = bytesToHex(valueCommitmentBytes);
+
+  // Compute value commitment hash for the ZK circuit public input
   const valueCommitmentHashFe = computeValueCommitmentHash(amount);
-  const valueCommitmentHashBytes = bigintToBytes32(valueCommitmentHashFe);
-  const valueCommitmentHex = bytesToHex(valueCommitmentHashBytes);
 
   // Build output witness for circuit
   const outputWitness: OutputWitness = {
@@ -317,9 +358,8 @@ async function createOutputDescription(
   const { proof } = await generateOutputProof(outputWitness);
   const proofBytes = proofToBytes(proof);
 
-  // Encrypt note for recipient using their pkHash as the encryption key
-  // (recipient can derive this from their own public key)
-  const encrypted = encryptNote(amount, pkHash, randomness, pkHash);
+  // Encrypt note for recipient using viewing key
+  const encrypted = encryptNote(amount, pkHash, randomness, viewingKey);
 
   return {
     note_commitment: toByteArray(commitment),
