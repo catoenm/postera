@@ -76,6 +76,25 @@ The node exposes:
 - Block Explorer at `http://localhost:8333/explorer`
 - Web Wallet at `http://localhost:8333/wallet`
 
+### Monitor Mining Progress
+
+Run the TUI miner monitor alongside your mining node:
+
+```bash
+# In a separate terminal
+./target/release/postera-miner-monitor --wallet wallet.json --node http://localhost:8333
+```
+
+The monitor displays:
+
+- Current block being mined and elapsed time
+- Blocks won (with ✓ indicator)
+- Total PSTR earned
+- PSTR per hour
+- Recent block history
+
+Press `q` to quit the monitor.
+
 ### Live Network
 
 The public network is available at:

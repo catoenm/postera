@@ -93,6 +93,9 @@ struct BlockResponse {
     transactions: Vec<String>,
     coinbase_reward: u64,
     total_fees: u64,
+    // Encrypted note data for miner monitoring (encrypted, so privacy-preserving)
+    coinbase_ephemeral_pk: String,
+    coinbase_ciphertext: String,
 }
 
 async fn get_block(
@@ -141,6 +144,8 @@ fn block_to_response(block: &ShieldedBlock, height: u64) -> BlockResponse {
         transactions: block.transactions.iter().map(|tx| hex::encode(tx.hash())).collect(),
         coinbase_reward: block.coinbase.reward,
         total_fees: block.total_fees(),
+        coinbase_ephemeral_pk: hex::encode(&block.coinbase.encrypted_note.ephemeral_pk),
+        coinbase_ciphertext: hex::encode(&block.coinbase.encrypted_note.ciphertext),
     }
 }
 
