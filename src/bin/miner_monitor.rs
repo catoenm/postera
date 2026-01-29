@@ -52,6 +52,8 @@ struct ChainInfo {
     next_difficulty: u64,
     commitment_count: u64,
     nullifier_count: u64,
+    #[allow(dead_code)]
+    proof_verification_enabled: bool,
 }
 
 #[derive(Deserialize)]

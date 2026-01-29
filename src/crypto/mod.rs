@@ -24,4 +24,4 @@ pub use nullifier::{Nullifier, NullifierKey, derive_nullifier};
 pub use note::{Note, EncryptedNote, ViewingKey};
 pub use merkle_tree::{CommitmentTree, MerklePath};
 pub use proof::{ZkProof, ProvingParams, VerifyingParams};
-pub use setup::{generate_parameters, load_parameters, save_parameters};
+pub use setup::{generate_parameters, load_parameters, save_parameters, get_or_generate_parameters};

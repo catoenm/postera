@@ -630,6 +630,7 @@ impl ShieldedBlockchain {
             next_difficulty: self.next_difficulty(),
             commitment_count: self.commitment_count(),
             nullifier_count: self.nullifier_count() as u64,
+            proof_verification_enabled: self.verifying_params.is_some(),
         }
     }
 
@@ -662,6 +663,7 @@ pub struct ChainInfo {
     pub next_difficulty: u64,
     pub commitment_count: u64,
     pub nullifier_count: u64,
+    pub proof_verification_enabled: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
