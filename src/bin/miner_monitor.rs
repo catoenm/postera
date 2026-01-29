@@ -21,7 +21,7 @@ use ratatui::{
 use reqwest::Client;
 use serde::Deserialize;
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 
@@ -52,6 +52,15 @@ struct ChainInfo {
     next_difficulty: u64,
     commitment_count: u64,
     nullifier_count: u64,
+}
+
+#[derive(Deserialize)]
+struct MinerStatsResponse {
+    is_mining: bool,
+    hashrate_hps: u64,
+    last_attempts: u64,
+    last_elapsed_ms: u64,
+    last_updated: u64,
 }
 
 #[derive(Deserialize)]
@@ -90,6 +99,9 @@ struct MiningStats {
     lifetime_pstr_earned: u64,
     session_blocks_won: u64,
     session_pstr_earned: u64,
+    miner_is_mining: Option<bool>,
+    miner_hashrate_hps: Option<u64>,
+    miner_last_updated: Option<u64>,
 }
 
 impl MiningStats {
@@ -104,6 +116,9 @@ impl MiningStats {
             lifetime_pstr_earned: 0,
             session_blocks_won: 0,
             session_pstr_earned: 0,
+            miner_is_mining: None,
+            miner_hashrate_hps: None,
+            miner_last_updated: None,
         }
     }
 
@@ -163,6 +178,13 @@ async fn fetch_block(client: &Client, node_url: &str, height: u64) -> Result<Blo
     let response = client.get(&url).send().await?;
     let block: BlockResponse = response.json().await?;
     Ok(block)
+}
+
+async fn fetch_miner_stats(client: &Client, node_url: &str) -> Result<MinerStatsResponse> {
+    let url = format!("{}/miner/stats", node_url);
+    let response = client.get(&url).send().await?;
+    let stats: MinerStatsResponse = response.json().await?;
+    Ok(stats)
 }
 
 fn check_if_mine(block: &BlockResponse, viewing_key: &ViewingKey, pk_hash: [u8; 32]) -> bool {
@@ -293,6 +315,13 @@ async fn run_app<B: Backend>(
             }
         }
 
+        // Fetch miner stats (best-effort; node may not expose this)
+        if let Ok(miner) = fetch_miner_stats(&client, node_url).await {
+            stats.miner_is_mining = Some(miner.is_mining);
+            stats.miner_hashrate_hps = Some(miner.hashrate_hps);
+            stats.miner_last_updated = Some(miner.last_updated);
+        }
+
         // Draw UI
         terminal.draw(|f| ui(f, &stats))?;
 
@@ -334,6 +363,17 @@ fn ui(f: &mut Frame, stats: &MiningStats) {
 
     // Left: Current block info
     let current_block_text = if stats.current_height > 0 {
+        let hashrate_text = match stats.miner_is_mining {
+            Some(false) => "Disabled".to_string(),
+            _ => {
+                if let Some(rate) = stats.miner_hashrate_hps {
+                    format!("{} H/s", rate)
+                } else {
+                    "Unavailable".to_string()
+                }
+            }
+        };
+
         let elapsed = stats
             .current_block_elapsed()
             .map(|d| format!("{:.1}s", d.as_secs_f64()))
@@ -355,6 +395,10 @@ fn ui(f: &mut Frame, stats: &MiningStats) {
                     format!("{} bits", stats.current_difficulty),
                     Style::default().fg(Color::White),
                 ),
+            ]),
+            Line::from(vec![
+                Span::styled("Miner Hashrate: ", Style::default().fg(Color::Yellow)),
+                Span::styled(hashrate_text, Style::default().fg(Color::Cyan)),
             ]),
             Line::from(vec![
                 Span::styled("Time Elapsed: ", Style::default().fg(Color::Yellow)),
