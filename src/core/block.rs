@@ -72,6 +72,39 @@ impl BlockHeader {
     }
 }
 
+/// Precomputed hash prefix for block headers to speed up mining.
+#[derive(Clone)]
+pub struct BlockHeaderHashPrefix {
+    hasher: Sha256,
+}
+
+impl BlockHeaderHashPrefix {
+    /// Build a prefix hasher from the immutable header fields.
+    pub fn new(header: &BlockHeader) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(&header.version.to_le_bytes());
+        hasher.update(&header.prev_hash);
+        hasher.update(&header.merkle_root);
+        hasher.update(&header.commitment_root);
+        hasher.update(&header.nullifier_root);
+        Self { hasher }
+    }
+
+    /// Hash a header using the precomputed prefix.
+    pub fn hash(&self, timestamp: u64, difficulty: u64, nonce: u64) -> [u8; BLOCK_HASH_SIZE] {
+        let mut hasher = self.hasher.clone();
+        hasher.update(&timestamp.to_le_bytes());
+        hasher.update(&difficulty.to_le_bytes());
+        hasher.update(&nonce.to_le_bytes());
+        hasher.finalize().into()
+    }
+
+    /// Check difficulty using the precomputed prefix.
+    pub fn meets_difficulty(&self, timestamp: u64, difficulty: u64, nonce: u64) -> bool {
+        count_leading_zeros(&self.hash(timestamp, difficulty, nonce)) >= difficulty as usize
+    }
+}
+
 /// A complete shielded block with header, transactions, and coinbase.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShieldedBlock {
@@ -349,6 +382,22 @@ mod tests {
         let hash2 = block.hash();
 
         assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_prefix_matches_full_hash() {
+        let mut block = ShieldedBlock::genesis(8, dummy_coinbase(0));
+        block.header.timestamp = 1_234_567;
+        block.header.nonce = 42;
+        block.header.difficulty = 12;
+
+        let header = &block.header;
+        let prefix = BlockHeaderHashPrefix::new(header);
+
+        assert_eq!(
+            header.hash(),
+            prefix.hash(header.timestamp, header.difficulty, header.nonce)
+        );
     }
 
     #[test]

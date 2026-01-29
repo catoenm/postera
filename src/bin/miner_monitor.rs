@@ -8,6 +8,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use postera::core::{BlockHeader, CoinbaseTransaction};
 use postera::crypto::note::{EncryptedNote, ViewingKey};
 use postera::wallet::ShieldedWallet;
 use ratatui::{
@@ -28,8 +29,12 @@ use tokio::time::{sleep, timeout};
 const DECIMALS: u64 = 9;
 const MAX_RECENT_BLOCKS: usize = 50;
 const RECENT_DISPLAY_BLOCKS: usize = 20;
-const REQUEST_TIMEOUT_SECS: u64 = 5;
+const REQUEST_TIMEOUT_SECS: u64 = 10;
 const UI_REFRESH_SECS: u64 = 1;
+const NETWORK_REFRESH_SECS: u64 = 10;
+const STARTUP_BATCH_SIZE: usize = 1000;
+const STARTUP_BATCH_DELAY_SECS: u64 = 1;
+const STARTUP_MAX_RETRIES: usize = 3;
 
 #[derive(Parser)]
 #[command(name = "postera-miner-monitor")]
@@ -66,21 +71,9 @@ struct MinerStatsResponse {
 }
 
 #[derive(Deserialize)]
-struct BlockResponse {
-    hash: String,
-    height: u64,
-    prev_hash: String,
-    timestamp: u64,
-    difficulty: u64,
-    nonce: u64,
-    tx_count: usize,
-    commitment_root: String,
-    nullifier_root: String,
-    transactions: Vec<String>,
-    coinbase_reward: u64,
-    total_fees: u64,
-    coinbase_ephemeral_pk: String,
-    coinbase_ciphertext: String,
+struct BlocksSinceBlock {
+    header: BlockHeader,
+    coinbase: CoinbaseTransaction,
 }
 
 struct BlockInfo {
@@ -175,11 +168,16 @@ async fn fetch_chain_info(client: &Client, node_url: &str) -> Result<ChainInfo> 
     Ok(info)
 }
 
-async fn fetch_block(client: &Client, node_url: &str, height: u64) -> Result<BlockResponse> {
-    let url = format!("{}/block/height/{}", node_url, height);
+async fn fetch_blocks_since(
+    client: &Client,
+    node_url: &str,
+    height: u64,
+    limit: usize,
+) -> Result<Vec<BlocksSinceBlock>> {
+    let url = format!("{}/blocks/since/{}?limit={}", node_url, height, limit);
     let response = client.get(&url).send().await?;
-    let block: BlockResponse = response.json().await?;
-    Ok(block)
+    let blocks: Vec<BlocksSinceBlock> = response.json().await?;
+    Ok(blocks)
 }
 
 async fn fetch_miner_stats(client: &Client, node_url: &str) -> Result<MinerStatsResponse> {
@@ -189,21 +187,11 @@ async fn fetch_miner_stats(client: &Client, node_url: &str) -> Result<MinerStats
     Ok(stats)
 }
 
-fn check_if_mine(block: &BlockResponse, viewing_key: &ViewingKey, pk_hash: [u8; 32]) -> bool {
-    let ephemeral_pk = hex::decode(&block.coinbase_ephemeral_pk).ok();
-    let ciphertext = hex::decode(&block.coinbase_ciphertext).ok();
-
-    if let (Some(epk), Some(ct)) = (ephemeral_pk, ciphertext) {
-        let encrypted_note = EncryptedNote {
-            ciphertext: ct,
-            ephemeral_pk: epk,
-        };
-
-        if let Some(note) = viewing_key.decrypt_note(&encrypted_note) {
-            return note.recipient_pk_hash == pk_hash;
-        }
-    }
-    false
+fn check_if_mine(encrypted_note: &EncryptedNote, viewing_key: &ViewingKey, pk_hash: [u8; 32]) -> bool {
+    viewing_key
+        .decrypt_note(encrypted_note)
+        .map(|note| note.recipient_pk_hash == pk_hash)
+        .unwrap_or(false)
 }
 
 async fn run_app<B: Backend>(
@@ -245,6 +233,7 @@ async fn run_app<B: Backend>(
         .context("Failed to build HTTP client")?;
     let mut stats = MiningStats::new();
     let mut last_checked_height = 0u64;
+    let mut last_network_fetch = Instant::now() - Duration::from_secs(NETWORK_REFRESH_SECS);
     let mut session_start_height: Option<u64> = None;
 
     loop {
@@ -252,76 +241,139 @@ async fn run_app<B: Backend>(
             return Ok(());
         }
 
-        // Fetch chain info
-        let info_result = tokio::select! {
-            _ = quit_rx.recv() => return Ok(()),
-            result = fetch_chain_info(&client, node_url) => result,
-        };
-        match info_result {
-            Ok(info) => {
-                if session_start_height.is_none() {
-                    session_start_height = Some(info.height);
-                }
-                stats.current_height = info.height;
-                stats.current_difficulty = info.difficulty;
+        if last_network_fetch.elapsed() >= Duration::from_secs(NETWORK_REFRESH_SECS) {
+            last_network_fetch = Instant::now();
 
-                // Check for new blocks
-                if info.height > last_checked_height {
-                    for h in (last_checked_height + 1)..=info.height {
-                        let block_result = tokio::select! {
-                            _ = quit_rx.recv() => return Ok(()),
-                            result = timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), fetch_block(&client, node_url, h)) => {
-                                result.unwrap_or_else(|_| Err(anyhow::anyhow!("block fetch timeout")))
+            // Fetch chain info
+            let info_result = tokio::select! {
+                _ = quit_rx.recv() => return Ok(()),
+                result = fetch_chain_info(&client, node_url) => result,
+            };
+            match info_result {
+                Ok(info) => {
+                    if session_start_height.is_none() {
+                        session_start_height = Some(info.height);
+                    }
+                    stats.current_height = info.height;
+                    stats.current_difficulty = info.difficulty;
+
+                    // Check for new blocks
+                    if info.height > last_checked_height {
+                        let mut target_height = info.height;
+                        let startup_scan = last_checked_height == 0;
+
+                        while last_checked_height < target_height {
+                            let mut attempt = 0usize;
+                            let mut blocks = Vec::new();
+
+                            while attempt <= STARTUP_MAX_RETRIES {
+                                let blocks_result = tokio::select! {
+                                    _ = quit_rx.recv() => return Ok(()),
+                                    result = timeout(
+                                        Duration::from_secs(REQUEST_TIMEOUT_SECS),
+                                        fetch_blocks_since(&client, node_url, last_checked_height, STARTUP_BATCH_SIZE),
+                                    ) => {
+                                        result.unwrap_or_else(|_| Err(anyhow::anyhow!("blocks fetch timeout")))
+                                    }
+                                };
+
+                                match blocks_result {
+                                    Ok(found) => {
+                                        blocks = found;
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        attempt += 1;
+                                        if attempt > STARTUP_MAX_RETRIES {
+                                            break;
+                                        }
+                                        sleep(Duration::from_secs(STARTUP_BATCH_DELAY_SECS)).await;
+                                    }
+                                }
                             }
-                        };
-                        let block = match block_result {
-                            Ok(block) => block,
-                            Err(_) => break,
-                        };
 
-                        let is_mine = check_if_mine(&block, &viewing_key, pk_hash);
+                            if blocks.is_empty() {
+                                if quit_rx.try_recv().is_ok() {
+                                    return Ok(());
+                                }
+                                sleep(Duration::from_secs(STARTUP_BATCH_DELAY_SECS)).await;
+                                let refresh = fetch_chain_info(&client, node_url).await.ok();
+                                if let Some(refresh) = refresh {
+                                    target_height = refresh.height;
+                                }
+                                continue;
+                            }
 
-                        if is_mine {
-                            stats.lifetime_blocks_won += 1;
-                            stats.lifetime_pstr_earned += block.coinbase_reward;
+                            let take_count = if startup_scan {
+                                STARTUP_BATCH_SIZE.min(blocks.len())
+                            } else {
+                                blocks.len()
+                            };
 
-                            if session_start_height
-                                .map(|start| block.height > start)
-                                .unwrap_or(false)
-                            {
-                                stats.session_blocks_won += 1;
-                                stats.session_pstr_earned += block.coinbase_reward;
+                            for block in blocks.drain(0..take_count) {
+                                let height = block.coinbase.height;
+                                let reward = block.coinbase.reward;
+                                let is_mine = check_if_mine(
+                                    &block.coinbase.encrypted_note,
+                                    &viewing_key,
+                                    pk_hash,
+                                );
+                                let hash = hex::encode(block.header.hash());
+
+                                if is_mine {
+                                    stats.lifetime_blocks_won += 1;
+                                    stats.lifetime_pstr_earned += reward;
+
+                                    if session_start_height
+                                        .map(|start| height > start)
+                                        .unwrap_or(false)
+                                    {
+                                        stats.session_blocks_won += 1;
+                                        stats.session_pstr_earned += reward;
+                                    }
+                                }
+
+                                stats.recent_blocks.push(BlockInfo {
+                                    height,
+                                    hash,
+                                    timestamp: block.header.timestamp,
+                                    reward,
+                                    is_mine,
+                                });
+
+                                if stats.recent_blocks.len() > MAX_RECENT_BLOCKS {
+                                    stats.recent_blocks.remove(0);
+                                }
+
+                                stats.last_block_time = Some(block.header.timestamp);
+                                last_checked_height = height;
+                            }
+
+                            if !startup_scan {
+                                break;
+                            }
+
+                            sleep(Duration::from_secs(STARTUP_BATCH_DELAY_SECS)).await;
+
+                            if last_checked_height >= target_height {
+                                if let Ok(refresh) = fetch_chain_info(&client, node_url).await {
+                                    target_height = refresh.height;
+                                }
                             }
                         }
-
-                        stats.recent_blocks.push(BlockInfo {
-                            height: block.height,
-                            hash: block.hash,
-                            timestamp: block.timestamp,
-                            reward: block.coinbase_reward,
-                            is_mine,
-                        });
-
-                        // Keep only last blocks for display
-                        if stats.recent_blocks.len() > MAX_RECENT_BLOCKS {
-                            stats.recent_blocks.remove(0);
-                        }
-
-                        stats.last_block_time = Some(block.timestamp);
-                        last_checked_height = block.height;
                     }
                 }
+                Err(_) => {
+                    // Connection error - will show in UI as "Waiting for chain info..."
+                }
             }
-            Err(_) => {
-                // Connection error - will show in UI as "Waiting for chain info..."
-            }
-        }
 
-        // Fetch miner stats (best-effort; node may not expose this)
-        if let Ok(miner) = fetch_miner_stats(&client, node_url).await {
-            stats.miner_is_mining = Some(miner.is_mining);
-            stats.miner_hashrate_hps = Some(miner.hashrate_hps);
-            stats.miner_last_updated = Some(miner.last_updated);
+            // Fetch miner stats (best-effort; node may not expose this)
+            if let Ok(miner) = fetch_miner_stats(&client, node_url).await {
+                stats.miner_is_mining = Some(miner.is_mining);
+                stats.miner_hashrate_hps = Some(miner.hashrate_hps);
+                stats.miner_last_updated = Some(miner.last_updated);
+            }
         }
 
         // Draw UI
