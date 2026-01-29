@@ -5,7 +5,7 @@
 //! data (block hashes, timestamps, fees) is exposed.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Html,
     routing::{get, post},
@@ -74,7 +74,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     );
     info!("Request body limit: {} bytes", MAX_BODY_SIZE);
 
-    Router::new()
+    let api_routes = Router::new()
         .route("/", get(index))
         .route("/chain/info", get(chain_info))
         .route("/miner/stats", get(miner_stats))
@@ -99,6 +99,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/witness/position/:position", get(get_witness_by_position))
         .route("/debug/commitments", get(debug_list_commitments))
         .route("/debug/poseidon", get(debug_poseidon_test))
+        .with_state(state)
+        // Apply rate limiting (returns 429 Too Many Requests when exceeded)
+        .layer(rate_limit_layer)
+        // Apply request body size limit (returns 413 Payload Too Large when exceeded)
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE));
+
+    let ui_routes = Router::new()
         // React app routes - serve index.html for SPA
         .route("/wallet", get(serve_index))
         .route("/wallet/*path", get(serve_index))
@@ -107,12 +114,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Static assets
         .nest_service("/assets", ServeDir::new("static/assets"))
         // Circuit files (WASM and proving keys)
-        .nest_service("/circuits", ServeDir::new("static/circuits"))
-        .with_state(state)
-        // Apply rate limiting (returns 429 Too Many Requests when exceeded)
-        .layer(rate_limit_layer)
-        // Apply request body size limit (returns 413 Payload Too Large when exceeded)
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
+        .nest_service("/circuits", ServeDir::new("static/circuits"));
+
+    Router::new().merge(api_routes).merge(ui_routes)
 }
 
 async fn index() -> &'static str {
@@ -491,20 +495,30 @@ struct ReceiveBlockResponse {
 async fn get_blocks_since(
     State(state): State<Arc<AppState>>,
     Path(since_height): Path<u64>,
+    Query(params): Query<BlocksSinceParams>,
 ) -> Json<Vec<ShieldedBlock>> {
     let chain = state.blockchain.read().unwrap();
     let current_height = chain.height();
+    let end_height = match params.limit {
+        Some(0) | None => current_height,
+        Some(limit) => current_height.min(since_height.saturating_add(limit as u64)),
+    };
 
     let mut blocks = Vec::new();
 
-    // Return blocks from since_height+1 to current_height
-    for h in (since_height + 1)..=current_height {
+    // Return blocks from since_height+1 to end_height
+    for h in (since_height + 1)..=end_height {
         if let Some(block) = chain.get_block_by_height(h) {
             blocks.push(block.clone());
         }
     }
 
     Json(blocks)
+}
+
+#[derive(Deserialize)]
+struct BlocksSinceParams {
+    limit: Option<usize>,
 }
 
 // ============ Peer Management Endpoints ============
@@ -699,10 +713,15 @@ struct OutputsSinceResponse {
 async fn get_outputs_since(
     State(state): State<Arc<AppState>>,
     Path(since_height): Path<u64>,
+    Query(params): Query<OutputsSinceParams>,
 ) -> Json<OutputsSinceResponse> {
     let chain = state.blockchain.read().unwrap();
     let current_height = chain.height();
     let commitment_root = hex::encode(chain.commitment_root());
+    let end_height = match params.limit {
+        Some(0) | None => current_height,
+        Some(limit) => current_height.min(since_height.saturating_add(limit as u64)),
+    };
 
     let mut outputs = Vec::new();
     let mut position = 0u64;
@@ -723,7 +742,7 @@ async fn get_outputs_since(
     }
 
     // Now collect outputs from start_height onwards
-    for h in start_height..=current_height {
+    for h in start_height..=end_height {
         if let Some(block) = chain.get_block_by_height(h) {
             // Transaction outputs
             for tx in &block.transactions {
@@ -756,6 +775,11 @@ async fn get_outputs_since(
         current_height,
         commitment_root,
     })
+}
+
+#[derive(Deserialize)]
+struct OutputsSinceParams {
+    limit: Option<usize>,
 }
 
 /// Request for checking nullifiers.
