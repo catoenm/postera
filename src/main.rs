@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use postera::config::{self, GENESIS_DIFFICULTY};
-use postera::consensus::mine_block;
+use postera::consensus::mine_block_with_jobs;
 use postera::core::ShieldedBlockchain;
 use postera::crypto::note::ViewingKey;
 use postera::network::{create_router, Mempool};
@@ -45,6 +45,9 @@ enum Commands {
         /// Mining difficulty (leading zero bits)
         #[arg(short, long, default_value = "16")]
         difficulty: u64,
+        /// Number of mining threads to use
+        #[arg(short, long, default_value = "1")]
+        jobs: usize,
     },
     /// Run a full node
     Node {
@@ -60,6 +63,9 @@ enum Commands {
         /// Wallet file for mining (enables mining if provided)
         #[arg(long)]
         mine: Option<String>,
+        /// Number of mining threads to use
+        #[arg(short, long, default_value = "1")]
+        jobs: usize,
         /// Disable connecting to seed nodes
         #[arg(long)]
         no_seeds: bool,
@@ -90,14 +96,16 @@ async fn main() -> anyhow::Result<()> {
             wallet,
             blocks,
             difficulty,
+            jobs,
         } => {
-            cmd_mine(&wallet, blocks, difficulty)?;
+            cmd_mine(&wallet, blocks, difficulty, jobs)?;
         }
         Commands::Node {
             port,
             peer,
             data_dir,
             mine,
+            jobs,
             no_seeds,
         } => {
             // Use config defaults, with CLI/env overrides
@@ -112,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
             };
             peers.extend(peer);
 
-            cmd_node(port, peers, &data_dir, mine).await?;
+            cmd_node(port, peers, &data_dir, mine, jobs).await?;
         }
     }
 
@@ -148,7 +156,8 @@ async fn cmd_balance(wallet_path: &str, _node: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64) -> anyhow::Result<()> {
+fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64, jobs: usize) -> anyhow::Result<()> {
+    let jobs = jobs.max(1);
     // Load wallet for mining rewards
     let wallet = ShieldedWallet::load(wallet_path)?;
     let miner_pk_hash = wallet.pk_hash();
@@ -158,6 +167,7 @@ fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64) -> anyhow::Result<(
     println!("Miner wallet: {}", wallet_path);
     println!("Miner pk_hash: {}", hex::encode(miner_pk_hash));
     println!("Difficulty: {} leading zero bits", difficulty);
+    println!("Threads: {}", jobs);
 
     let mut blockchain = ShieldedBlockchain::with_miner(difficulty, miner_pk_hash, &viewing_key);
     let mut blocks_mined = 0u64;
@@ -173,7 +183,7 @@ fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64) -> anyhow::Result<(
         );
 
         let start = std::time::Instant::now();
-        let attempts = mine_block(&mut block);
+        let attempts = mine_block_with_jobs(&mut block, jobs);
         let elapsed = start.elapsed();
 
         println!(
@@ -205,9 +215,14 @@ fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64) -> anyhow::Result<(
     Ok(())
 }
 
-async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine_wallet: Option<String>) -> anyhow::Result<()> {
-    use postera::network::{AppState, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
-    use postera::consensus::mine_block;
+async fn cmd_node(
+    port: u16,
+    peers: Vec<String>,
+    data_dir: &str,
+    mine_wallet: Option<String>,
+    jobs: usize,
+) -> anyhow::Result<()> {
+    use postera::network::{AppState, MinerStats, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
     use std::sync::RwLock;
 
     // Create data directory if needed
@@ -249,6 +264,7 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine_wallet: Op
         blockchain: RwLock::new(blockchain),
         mempool: RwLock::new(mempool),
         peers: RwLock::new(peers.clone()),
+        miner_stats: RwLock::new(MinerStats::default()),
     });
 
     // Create router with API (wallet and explorer are served from static React app)
@@ -307,10 +323,21 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine_wallet: Op
 
     // Start integrated miner if requested
     if let Some((miner_pk_hash, viewing_key)) = miner_info {
+        let jobs = jobs.max(1);
         let mine_state = state.clone();
 
         tokio::spawn(async move {
             println!("Starting integrated miner...");
+            println!("Mining threads: {}", jobs);
+            {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let mut stats = mine_state.miner_stats.write().unwrap();
+                stats.is_mining = true;
+                stats.last_updated = now;
+            }
 
             loop {
                 // Get mempool transactions
@@ -333,8 +360,29 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine_wallet: Op
                 println!("Mining block {} (difficulty: {})...", height, difficulty);
 
                 // Mine in a blocking task to not block the async runtime
+                let mine_state_for_stats = mine_state.clone();
                 let mined_block = tokio::task::spawn_blocking(move || {
-                    mine_block(&mut block);
+                    let start = std::time::Instant::now();
+                    let attempts = mine_block_with_jobs(&mut block, jobs);
+                    let elapsed = start.elapsed();
+                    let hashrate = if elapsed.as_secs_f64() > 0.0 {
+                        (attempts as f64 / elapsed.as_secs_f64()) as u64
+                    } else {
+                        0
+                    };
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+
+                    {
+                        let mut stats = mine_state_for_stats.miner_stats.write().unwrap();
+                        stats.hashrate_hps = hashrate;
+                        stats.last_attempts = attempts;
+                        stats.last_elapsed_ms = elapsed.as_millis() as u64;
+                        stats.last_updated = now;
+                    }
+
                     block
                 }).await.unwrap();
 
