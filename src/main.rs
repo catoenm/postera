@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use postera::config::{self, GENESIS_DIFFICULTY};
-use postera::consensus::mine_block_with_jobs;
+use postera::consensus::MiningPool;
 use postera::core::ShieldedBlockchain;
 use postera::crypto::note::ViewingKey;
 use postera::network::{create_router, Mempool};
@@ -169,6 +169,7 @@ fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64, jobs: usize) -> any
     println!("Difficulty: {} leading zero bits", difficulty);
     println!("Threads: {}", jobs);
 
+    let pool = MiningPool::new(jobs);
     let mut blockchain = ShieldedBlockchain::with_miner(difficulty, miner_pk_hash, &viewing_key);
     let mut blocks_mined = 0u64;
 
@@ -183,7 +184,7 @@ fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64, jobs: usize) -> any
         );
 
         let start = std::time::Instant::now();
-        let attempts = mine_block_with_jobs(&mut block, jobs);
+        let attempts = pool.mine_block(&mut block);
         let elapsed = start.elapsed();
 
         println!(
@@ -325,6 +326,7 @@ async fn cmd_node(
     if let Some((miner_pk_hash, viewing_key)) = miner_info {
         let jobs = jobs.max(1);
         let mine_state = state.clone();
+        let pool = Arc::new(MiningPool::new(jobs));
 
         tokio::spawn(async move {
             println!("Starting integrated miner...");
@@ -361,9 +363,10 @@ async fn cmd_node(
 
                 // Mine in a blocking task to not block the async runtime
                 let mine_state_for_stats = mine_state.clone();
+                let pool = Arc::clone(&pool);
                 let mined_block = tokio::task::spawn_blocking(move || {
                     let start = std::time::Instant::now();
-                    let attempts = mine_block_with_jobs(&mut block, jobs);
+                    let attempts = pool.mine_block(&mut block);
                     let elapsed = start.elapsed();
                     let hashrate = if elapsed.as_secs_f64() > 0.0 {
                         (attempts as f64 / elapsed.as_secs_f64()) as u64
