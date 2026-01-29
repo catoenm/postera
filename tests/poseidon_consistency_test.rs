@@ -3,7 +3,7 @@
 //! These tests verify that native Poseidon hash computations match
 //! the circuit computations exactly.
 
-use ark_bls12_381::Fr;
+use ark_bn254::Fr;
 use ark_ff::UniformRand;
 use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar, R1CSVar};
 use ark_relations::r1cs::ConstraintSystem;

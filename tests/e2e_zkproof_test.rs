@@ -6,7 +6,7 @@
 //! 3. Generate proofs
 //! 4. Verify proofs
 
-use ark_bls12_381::Fr;
+use ark_bn254::Fr;
 use ark_ff::UniformRand;
 use ark_std::rand::SeedableRng;
 use ark_std::rand::rngs::StdRng;
