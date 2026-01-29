@@ -12,6 +12,10 @@ use axum::{
     Json, Router,
 };
 use tower_http::services::ServeDir;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_governor::{
+    governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
@@ -21,6 +25,15 @@ use tracing::{info, warn};
 
 use super::Mempool;
 
+/// Maximum request body size (10 MB)
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+/// Rate limit: requests per second per IP
+const RATE_LIMIT_RPS: u64 = 50;
+
+/// Rate limit: burst size (max requests before throttling)
+const RATE_LIMIT_BURST: u32 = 100;
+
 /// Shared application state for the API.
 pub struct AppState {
     pub blockchain: RwLock<ShieldedBlockchain>,
@@ -29,11 +42,36 @@ pub struct AppState {
     pub peers: RwLock<Vec<String>>,
 }
 
-/// Create the API router.
+/// Create the API router with rate limiting and request size limits.
 ///
 /// Note: This is a privacy-preserving blockchain. Account balances and
 /// transaction amounts are not visible through the API.
+///
+/// Rate limiting: 50 requests/second per IP with burst of 100.
+/// Request body limit: 10 MB max.
 pub fn create_router(state: Arc<AppState>) -> Router {
+    // Configure rate limiting using Governor
+    // Uses SmartIpKeyExtractor to handle proxied requests (X-Forwarded-For)
+    let governor_config = Arc::new(
+        GovernorConfigBuilder::default()
+            .per_second(RATE_LIMIT_RPS)
+            .burst_size(RATE_LIMIT_BURST)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .expect("Failed to build rate limiter config"),
+    );
+
+    let rate_limit_layer = GovernorLayer {
+        config: governor_config,
+    };
+
+    // Log rate limiter configuration
+    info!(
+        "Rate limiting enabled: {} req/s, burst size {}",
+        RATE_LIMIT_RPS, RATE_LIMIT_BURST
+    );
+    info!("Request body limit: {} bytes", MAX_BODY_SIZE);
+
     Router::new()
         .route("/", get(index))
         .route("/chain/info", get(chain_info))
@@ -68,6 +106,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Circuit files (WASM and proving keys)
         .nest_service("/circuits", ServeDir::new("static/circuits"))
         .with_state(state)
+        // Apply rate limiting (returns 429 Too Many Requests when exceeded)
+        .layer(rate_limit_layer)
+        // Apply request body size limit (returns 413 Payload Too Large when exceeded)
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
 }
 
 async fn index() -> &'static str {

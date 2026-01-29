@@ -391,9 +391,9 @@ async fn cmd_node(port: u16, peers: Vec<String>, data_dir: &str, mine_wallet: Op
     println!("Node is running. Press Ctrl+C to stop.");
     println!();
 
-    // Start server
+    // Start server with ConnectInfo for rate limiting
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
 
     Ok(())
 }
