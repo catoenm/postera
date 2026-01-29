@@ -63,8 +63,8 @@ This generates a wallet with:
 # Join the live network
 ./target/release/postera node --peer https://postera.network
 
-# Join and mine to your wallet
-./target/release/postera node --mine wallet.json --peer https://postera.network
+# Join and mine to your wallet (use --jobs to set mining threads)
+./target/release/postera node --mine wallet.json --jobs 8 --difficulty 20 --peer https://postera.network
 
 # Start a standalone node on default port 8333
 ./target/release/postera node
@@ -142,7 +142,13 @@ CLI support coming soon:
 ### Standalone Mining
 
 ```bash
-./target/release/postera mine -a <your-address> -d 16
+./target/release/postera mine --wallet wallet.json --difficulty 20 --jobs 8
+```
+
+### Benchmark Mining
+
+```bash
+./target/release/postera benchmark --wallet wallet.json --difficulty 20 --jobs 8 --blocks 20
 ```
 
 ## Environment Variables

@@ -17,6 +17,12 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Clone, Copy)]
+enum MiningMode {
+    Mine,
+    Benchmark,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Generate a new shielded wallet
@@ -44,6 +50,21 @@ enum Commands {
         blocks: u64,
         /// Mining difficulty (leading zero bits)
         #[arg(short, long, default_value = "16")]
+        difficulty: u64,
+        /// Number of mining threads to use
+        #[arg(short, long, default_value = "1")]
+        jobs: usize,
+    },
+    /// Run a mining benchmark (mines N blocks and prints avg hashrate)
+    Benchmark {
+        /// Wallet file (mining rewards go to this wallet)
+        #[arg(short, long, default_value = "wallet.json")]
+        wallet: String,
+        /// Number of blocks to mine
+        #[arg(short, long, default_value = "20")]
+        blocks: u64,
+        /// Mining difficulty (leading zero bits)
+        #[arg(short, long, default_value = "20")]
         difficulty: u64,
         /// Number of mining threads to use
         #[arg(short, long, default_value = "1")]
@@ -98,7 +119,27 @@ async fn main() -> anyhow::Result<()> {
             difficulty,
             jobs,
         } => {
-            cmd_mine(&wallet, blocks, difficulty, jobs)?;
+            cmd_mine(
+                &wallet,
+                blocks,
+                difficulty,
+                jobs,
+                MiningMode::Mine,
+            )?;
+        }
+        Commands::Benchmark {
+            wallet,
+            blocks,
+            difficulty,
+            jobs,
+        } => {
+            cmd_mine(
+                &wallet,
+                blocks,
+                difficulty,
+                jobs,
+                MiningMode::Benchmark,
+            )?;
         }
         Commands::Node {
             port,
@@ -156,22 +197,32 @@ async fn cmd_balance(wallet_path: &str, _node: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64, jobs: usize) -> anyhow::Result<()> {
+fn cmd_mine(
+    wallet_path: &str,
+    blocks: u64,
+    difficulty: u64,
+    jobs: usize,
+    mode: MiningMode,
+) -> anyhow::Result<()> {
     let jobs = jobs.max(1);
     // Load wallet for mining rewards
     let wallet = ShieldedWallet::load(wallet_path)?;
     let miner_pk_hash = wallet.pk_hash();
     let viewing_key = wallet.viewing_key().clone();
 
-    println!("Starting standalone miner...");
+    match mode {
+        MiningMode::Mine => println!("Starting standalone miner..."),
+        MiningMode::Benchmark => println!("Starting mining benchmark..."),
+    }
     println!("Miner wallet: {}", wallet_path);
     println!("Miner pk_hash: {}", hex::encode(miner_pk_hash));
     println!("Difficulty: {} leading zero bits", difficulty);
     println!("Threads: {}", jobs);
-
     let pool = MiningPool::new(jobs);
     let mut blockchain = ShieldedBlockchain::with_miner(difficulty, miner_pk_hash, &viewing_key);
     let mut blocks_mined = 0u64;
+    let mut total_attempts = 0u64;
+    let mut total_elapsed = std::time::Duration::ZERO;
 
     loop {
         let mempool_txs = vec![]; // Standalone miner has no mempool
@@ -186,6 +237,8 @@ fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64, jobs: usize) -> any
         let start = std::time::Instant::now();
         let attempts = pool.mine_block(&mut block);
         let elapsed = start.elapsed();
+        total_attempts = total_attempts.saturating_add(attempts);
+        total_elapsed += elapsed;
 
         println!(
             "Block mined! Hash: {}...",
@@ -209,6 +262,20 @@ fn cmd_mine(wallet_path: &str, blocks: u64, difficulty: u64, jobs: usize) -> any
 
         if blocks > 0 && blocks_mined >= blocks {
             println!("\nMined {} blocks, stopping.", blocks_mined);
+            if total_elapsed.as_secs_f64() > 0.0 {
+                let avg_hashrate = total_attempts as f64 / total_elapsed.as_secs_f64();
+                let label = match mode {
+                    MiningMode::Mine => "Summary",
+                    MiningMode::Benchmark => "Benchmark summary",
+                };
+                println!("{}:", label);
+                println!(
+                    "  Total attempts: {} in {:.2}s",
+                    total_attempts,
+                    total_elapsed.as_secs_f64()
+                );
+                println!("  Avg hashrate: {:.0} H/s", avg_hashrate);
+            }
             break;
         }
     }
