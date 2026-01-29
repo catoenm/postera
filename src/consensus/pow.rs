@@ -1,6 +1,6 @@
 //! Proof-of-work mining for shielded blocks.
 
-use crate::core::ShieldedBlock;
+use crate::core::{BlockHeaderHashPrefix, ShieldedBlock};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
@@ -36,6 +36,7 @@ pub fn mine_block_with_jobs(block: &mut ShieldedBlock, jobs: usize) -> u64 {
             .nonce
             .wrapping_add(worker_id as u64);
 
+        let prefix = BlockHeaderHashPrefix::new(&local_block.header);
         let found = Arc::clone(&found);
         let attempts_total = Arc::clone(&attempts_total);
         let result = Arc::clone(&result);
@@ -48,7 +49,11 @@ pub fn mine_block_with_jobs(block: &mut ShieldedBlock, jobs: usize) -> u64 {
                     break;
                 }
 
-                if local_block.header.meets_difficulty() {
+                if prefix.meets_difficulty(
+                    local_block.header.timestamp,
+                    local_block.header.difficulty,
+                    local_block.header.nonce,
+                ) {
                     if !found.swap(true, Ordering::Relaxed) {
                         let mut guard = result.lock().unwrap();
                         *guard = Some(local_block.clone());
@@ -83,10 +88,15 @@ pub fn mine_block_with_jobs(block: &mut ShieldedBlock, jobs: usize) -> u64 {
 }
 
 fn mine_block_single(block: &mut ShieldedBlock) -> u64 {
+    let prefix = BlockHeaderHashPrefix::new(&block.header);
     let mut attempts = 0u64;
 
     loop {
-        if block.header.meets_difficulty() {
+        if prefix.meets_difficulty(
+            block.header.timestamp,
+            block.header.difficulty,
+            block.header.nonce,
+        ) {
             return attempts;
         }
 
