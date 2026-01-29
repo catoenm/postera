@@ -6,4 +6,4 @@ pub use difficulty::{
     DifficultyStats, ADJUSTMENT_INTERVAL, MAX_DIFFICULTY, MIN_DIFFICULTY,
     TARGET_BLOCK_TIME_SECS,
 };
-pub use pow::{mine_block, mine_block_with_jobs, Miner};
+pub use pow::{mine_block, mine_block_with_jobs, Miner, MinerPool};
