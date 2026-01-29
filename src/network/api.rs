@@ -27,6 +27,8 @@ pub struct AppState {
     pub mempool: RwLock<Mempool>,
     /// List of known peer URLs for gossip
     pub peers: RwLock<Vec<String>>,
+    /// Stats for the local miner (if running)
+    pub miner_stats: RwLock<MinerStats>,
 }
 
 /// Create the API router.
@@ -37,6 +39,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/chain/info", get(chain_info))
+        .route("/miner/stats", get(miner_stats))
         .route("/block/:hash", get(get_block))
         .route("/block/height/:height", get(get_block_by_height))
         .route("/tx", post(submit_transaction))
@@ -77,6 +80,20 @@ async fn index() -> &'static str {
 async fn chain_info(State(state): State<Arc<AppState>>) -> Json<ChainInfo> {
     let chain = state.blockchain.read().unwrap();
     Json(chain.info())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MinerStats {
+    pub is_mining: bool,
+    pub hashrate_hps: u64,
+    pub last_attempts: u64,
+    pub last_elapsed_ms: u64,
+    pub last_updated: u64,
+}
+
+async fn miner_stats(State(state): State<Arc<AppState>>) -> Json<MinerStats> {
+    let stats = state.miner_stats.read().unwrap().clone();
+    Json(stats)
 }
 
 #[derive(Serialize)]
