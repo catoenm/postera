@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_governor::{
     governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
@@ -114,7 +114,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Static assets
         .nest_service("/assets", ServeDir::new("static/assets"))
         // Circuit files (WASM and proving keys)
-        .nest_service("/circuits", ServeDir::new("static/circuits"));
+        .nest_service("/circuits", ServeDir::new("static/circuits"))
+        // Root-level static files
+        .route_service("/logo.png", ServeFile::new("static/logo.png"))
+        .route_service("/vite.svg", ServeFile::new("static/vite.svg"));
 
     Router::new().merge(api_routes).merge(ui_routes)
 }
