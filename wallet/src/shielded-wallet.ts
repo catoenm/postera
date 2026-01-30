@@ -156,6 +156,18 @@ export class ShieldedWallet {
     let newNotesFound = 0;
 
     try {
+      // First, check current chain height to detect chain resets
+      const initialResponse = await getOutputsSince(0);
+      const current_height = initialResponse.current_height;
+
+      // Detect chain reset: if chain height is lower than our last scanned height,
+      // the chain was reset and we need to clear our state and rescan from 0
+      if (this.lastScannedHeight > current_height) {
+        onProgress?.(`Chain reset detected (height ${current_height} < last scanned ${this.lastScannedHeight}). Rescanning from genesis...`);
+        this.notes = [];
+        this.lastScannedHeight = -1;
+      }
+
       // API expects unsigned height, use 0 for initial scan
       // When sinceHeight=0, API returns ALL outputs including genesis
       // When sinceHeight>0, API returns outputs from sinceHeight+1 onwards
@@ -163,8 +175,9 @@ export class ShieldedWallet {
 
       onProgress?.(`Fetching outputs since height ${sinceHeight}...`);
 
-      const response = await getOutputsSince(sinceHeight);
-      const { outputs, current_height } = response;
+      // Use the initial response if scanning from 0, otherwise fetch again
+      const response = sinceHeight === 0 ? initialResponse : await getOutputsSince(sinceHeight);
+      const { outputs } = response;
 
       onProgress?.(`Processing ${outputs.length} outputs...`);
 
