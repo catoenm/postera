@@ -150,15 +150,18 @@ export default function Explorer() {
 
   return (
     <div className="app">
-      <main className="container">
-        <nav className="nav-tabs">
+      <header className="app-header">
+        <Link to="/" className="logo">
+          <img src="/logo.png" alt="Postera" className="logo-img" />
+          <span>Postera</span>
+        </Link>
+        <nav className="main-nav">
           <Link to="/explorer" className="active">Explorer</Link>
-          <Link to="/wallet">Balance</Link>
-          <Link to="/wallet">Send</Link>
-          <Link to="/wallet">Receive</Link>
-          <Link to="/wallet">Sign</Link>
+          <Link to="/wallet">Wallet</Link>
         </nav>
+      </header>
 
+      <main className="container">
         <input
         type="text"
         className="search"

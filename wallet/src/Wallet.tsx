@@ -302,8 +302,17 @@ export default function Wallet() {
     return (
       <div className="app">
         <main className="container">
+          <header className="app-header">
+        <Link to="/" className="logo">
+          <img src="/logo.png" alt="Postera" className="logo-img" />
+          <span>Postera</span>
+        </Link>
+        <nav className="main-nav">
+          <Link to="/explorer">Explorer</Link>
+          <Link to="/wallet" className="active">Wallet</Link>
+        </nav>
+      </header>
           <nav className="nav-tabs">
-            <Link to="/explorer">Explorer</Link>
             <a className="active">Balance</a>
             <a>Send</a>
             <a>Receive</a>
@@ -320,8 +329,17 @@ export default function Wallet() {
     return (
       <div className="app">
         <main className="container">
+          <header className="app-header">
+        <Link to="/" className="logo">
+          <img src="/logo.png" alt="Postera" className="logo-img" />
+          <span>Postera</span>
+        </Link>
+        <nav className="main-nav">
+          <Link to="/explorer">Explorer</Link>
+          <Link to="/wallet" className="active">Wallet</Link>
+        </nav>
+      </header>
           <nav className="nav-tabs">
-            <Link to="/explorer">Explorer</Link>
             <a className="active">Balance</a>
             <a>Send</a>
             <a>Receive</a>
@@ -377,9 +395,19 @@ export default function Wallet() {
   // Wallet view
   return (
     <div className="app">
+      <header className="app-header">
+        <Link to="/" className="logo">
+          <img src="/logo.png" alt="Postera" className="logo-img" />
+          <span>Postera</span>
+        </Link>
+        <nav className="main-nav">
+          <Link to="/explorer">Explorer</Link>
+          <Link to="/wallet" className="active">Wallet</Link>
+        </nav>
+      </header>
+
       <main className="container">
         <nav className="nav-tabs">
-          <Link to="/explorer">Explorer</Link>
           <a className={view === 'wallet' ? 'active' : ''} onClick={() => setView('wallet')}>
             Balance
           </a>

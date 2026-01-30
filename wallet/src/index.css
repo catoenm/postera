@@ -40,10 +40,12 @@ body {
 /* Header */
 .app-header {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
-  background: transparent;
-  padding: 8px 24px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  backdrop-filter: blur(12px);
+  padding: 12px 24px;
 }
 
 .app-header-inner {
