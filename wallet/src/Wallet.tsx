@@ -301,17 +301,14 @@ export default function Wallet() {
   if (loading) {
     return (
       <div className="app">
-        <header className="app-header">
-          <Link to="/" className="logo">
-            <img src="/logo.png" alt="Postera" className="logo-img" />
-            <span>Postera</span>
-          </Link>
-          <nav className="main-nav">
-            <Link to="/explorer">Explorer</Link>
-            <Link to="/wallet" className="active">Wallet</Link>
-          </nav>
-        </header>
         <main className="container">
+          <nav className="nav-tabs">
+            <Link to="/explorer">Explorer</Link>
+            <a className="active">Balance</a>
+            <a>Send</a>
+            <a>Receive</a>
+            <a>Sign</a>
+          </nav>
           <div className="loading">Loading...</div>
         </main>
       </div>
@@ -322,17 +319,14 @@ export default function Wallet() {
   if (!wallet) {
     return (
       <div className="app">
-        <header className="app-header">
-          <Link to="/" className="logo">
-            <img src="/logo.png" alt="Postera" className="logo-img" />
-            <span>Postera</span>
-          </Link>
-          <nav className="main-nav">
-            <Link to="/explorer">Explorer</Link>
-            <Link to="/wallet" className="active">Wallet</Link>
-          </nav>
-        </header>
         <main className="container">
+          <nav className="nav-tabs">
+            <Link to="/explorer">Explorer</Link>
+            <a className="active">Balance</a>
+            <a>Send</a>
+            <a>Receive</a>
+            <a>Sign</a>
+          </nav>
           <h1>Create Wallet</h1>
           <p className="subtitle">Get started with private, quantum-resistant money</p>
 
@@ -383,21 +377,9 @@ export default function Wallet() {
   // Wallet view
   return (
     <div className="app">
-      <header className="app-header">
-        <div className="app-header-inner">
-          <Link to="/" className="logo">
-            <img src="/logo.png" alt="Postera" className="logo-img" />
-            <span>Postera</span>
-          </Link>
-          <nav className="main-nav">
-            <Link to="/explorer">Explorer</Link>
-            <Link to="/wallet" className="active">Wallet</Link>
-          </nav>
-        </div>
-      </header>
-
       <main className="container">
         <nav className="nav-tabs">
+          <Link to="/explorer">Explorer</Link>
           <a className={view === 'wallet' ? 'active' : ''} onClick={() => setView('wallet')}>
             Balance
           </a>
@@ -407,10 +389,10 @@ export default function Wallet() {
           <a className={view === 'receive' ? 'active' : ''} onClick={() => setView('receive')}>
             Receive
           </a>
-        <a className={view === 'sign' ? 'active' : ''} onClick={() => setView('sign')}>
-          Sign
-        </a>
-      </nav>
+          <a className={view === 'sign' ? 'active' : ''} onClick={() => setView('sign')}>
+            Sign
+          </a>
+        </nav>
 
       {view === 'wallet' && (
         <>
@@ -480,11 +462,15 @@ export default function Wallet() {
       )}
 
       {view === 'send' && (
-        <div className="card">
-          <h2>Send PSTR</h2>
-          <p className="info-text">
-            Send shielded PSTR to another wallet. Only the recipient can see the amount.
-          </p>
+        <>
+          <div className="page-header">
+            <img src="/logo.png" alt="PSTR" className="page-header-logo" />
+            <div className="page-header-text">
+              <h1>Send PSTR</h1>
+              <p>Send shielded funds privately</p>
+            </div>
+          </div>
+          <div className="card">
 
           <div className="form-group">
             <label>Recipient Public Key Hash</label>
@@ -534,12 +520,19 @@ export default function Wallet() {
             </div>
           )}
         </div>
+        </>
       )}
 
       {view === 'receive' && (
-        <div className="card">
-          <h2>Receive PSTR</h2>
-          <p>Share your public key hash to receive shielded funds:</p>
+        <>
+          <div className="page-header">
+            <img src="/logo.png" alt="PSTR" className="page-header-logo" />
+            <div className="page-header-text">
+              <h1>Receive PSTR</h1>
+              <p>Share your address to receive funds</p>
+            </div>
+          </div>
+          <div className="card">
           <div className="form-group">
             <label>Your Public Key Hash (pk_hash)</label>
             <div className="address-display">
@@ -556,15 +549,19 @@ export default function Wallet() {
             Senders will encrypt notes to your pk_hash. Only you can decrypt them.
           </p>
         </div>
+        </>
       )}
 
       {view === 'sign' && (
-        <div className="card">
-          <h2>Sign Message</h2>
-          <p className="info-text">
-            Sign any message with your private key. This proves you control this wallet
-            without revealing your secret key. The signature is created entirely in your browser.
-          </p>
+        <>
+          <div className="page-header">
+            <img src="/logo.png" alt="PSTR" className="page-header-logo" />
+            <div className="page-header-text">
+              <h1>Sign Message</h1>
+              <p>Prove ownership with quantum-resistant signatures</p>
+            </div>
+          </div>
+          <div className="card">
           <div className="form-group">
             <label>Message to Sign</label>
             <textarea
@@ -606,6 +603,7 @@ export default function Wallet() {
             </div>
           )}
         </div>
+        </>
       )}
       </main>
     </div>

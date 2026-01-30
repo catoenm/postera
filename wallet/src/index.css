@@ -40,11 +40,9 @@ body {
 /* Header */
 .app-header {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-color);
-  backdrop-filter: blur(12px);
+  background: transparent;
   padding: 8px 24px;
 }
 
@@ -107,6 +105,32 @@ body {
 .main-nav a.active {
   color: white;
   background: var(--accent-gradient);
+}
+
+/* Page header with logo */
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.page-header-logo {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  box-shadow: 0 4px 16px rgba(88, 166, 255, 0.3);
+}
+
+.page-header-text h1 {
+  font-size: 1.75rem;
+  margin-bottom: 4px;
+}
+
+.page-header-text p {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  margin: 0;
 }
 
 /* Balance display with logo */
