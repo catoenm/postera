@@ -50,3 +50,6 @@ circuits/build/
 *.sym
 *.zkey
 circuits/**/*.wasm
+
+# Keep verification keys (committed for reproducibility)
+!circuits/keys/

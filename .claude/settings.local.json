@@ -85,7 +85,16 @@
       "Bash(sysctl:*)",
       "Bash(log show:*)",
       "Bash(ulimit:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: auto-detect chain reset and rescan wallet from genesis\n\nWhen the chain height is lower than the wallet''s last scanned height,\nautomatically clear notes and rescan from block 0.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(git stash:*)",
+      "Bash(git fetch:*)",
+      "Bash(git merge:*)",
+      "Bash(git -c user.email=\"noreply@anthropic.com\" -c user.name=\"Claude\" commit -m \"$\\(cat <<''EOF''\nMerge origin/main: combine SIMD mining with Circom verification\n\nResolved merge conflict to keep both:\n- SIMD mining support from origin/main\n- CircomVerifyingParams for ZK proof verification\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(flyctl status:*)",
+      "Bash(flyctl deploy:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

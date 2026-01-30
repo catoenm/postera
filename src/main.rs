@@ -378,22 +378,8 @@ async fn cmd_node(
     println!();
     println!("Loading Circom verification keys...");
 
-    // Look for verification keys in circuits/build/
-    let spend_vkey_path = "circuits/build/spend_vkey.json";
-    let output_vkey_path = "circuits/build/output_vkey.json";
-
-    if !std::path::Path::new(spend_vkey_path).exists() {
-        return Err(anyhow::anyhow!(
-            "Spend verification key not found at {}. Run 'npm run build' in circuits/ first.",
-            spend_vkey_path
-        ));
-    }
-    if !std::path::Path::new(output_vkey_path).exists() {
-        return Err(anyhow::anyhow!(
-            "Output verification key not found at {}. Run 'npm run build' in circuits/ first.",
-            output_vkey_path
-        ));
-    }
+    // Look for verification keys in circuits/keys/ (committed) first, then circuits/build/ (local dev)
+    let (spend_vkey_path, output_vkey_path) = find_verification_keys()?;
 
     println!("  Loading {}...", spend_vkey_path);
     println!("  Loading {}...", output_vkey_path);
