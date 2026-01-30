@@ -22,7 +22,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 
 # Create dummy src to cache dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs
+RUN mkdir -p src/bin && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && echo "fn main() {}" > src/bin/miner_monitor.rs
 
 # Build dependencies (this layer is cached)
 RUN cargo build --release && rm -rf src
@@ -51,6 +51,9 @@ COPY --from=frontend-builder /app/static ./static
 
 # Copy wallet file for mining
 COPY wallet.json ./wallet.json
+
+# Copy circuit verification keys for ZK proof verification (from committed keys directory)
+COPY circuits/keys ./circuits/keys
 
 # Create data directory
 RUN mkdir -p /app/data
