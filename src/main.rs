@@ -1,9 +1,9 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use postera::config::{self, GENESIS_DIFFICULTY};
-use postera::consensus::MiningPool;
+use postera::consensus::{MiningPool, SimdMode};
 use postera::core::ShieldedBlockchain;
 use postera::crypto::note::ViewingKey;
 use postera::network::{create_router, Mempool};
@@ -15,6 +15,29 @@ use postera::wallet::ShieldedWallet;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SimdArg {
+    Neon,
+}
+
+impl From<SimdArg> for SimdMode {
+    fn from(value: SimdArg) -> Self {
+        match value {
+            SimdArg::Neon => SimdMode::Neon,
+        }
+    }
+}
+
+fn require_simd_support(simd: Option<SimdMode>) -> Option<SimdMode> {
+    if let Some(mode) = simd {
+        if !mode.is_supported() {
+            eprintln!("SIMD mode {:?} requires ARMv8 NEON+SHA2 support.", mode);
+            std::process::exit(1);
+        }
+    }
+    simd
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +77,9 @@ enum Commands {
         /// Number of mining threads to use
         #[arg(short, long, default_value = "1")]
         jobs: usize,
+        /// SIMD mode (optional). Currently supports: neon
+        #[arg(short, long, value_enum)]
+        simd: Option<SimdArg>,
     },
     /// Run a mining benchmark (mines N blocks and prints avg hashrate)
     Benchmark {
@@ -69,6 +95,9 @@ enum Commands {
         /// Number of mining threads to use
         #[arg(short, long, default_value = "1")]
         jobs: usize,
+        /// SIMD mode (optional). Currently supports: neon
+        #[arg(short, long, value_enum)]
+        simd: Option<SimdArg>,
     },
     /// Run a full node
     Node {
@@ -87,12 +116,12 @@ enum Commands {
         /// Number of mining threads to use
         #[arg(short, long, default_value = "1")]
         jobs: usize,
+        /// SIMD mode (optional). Currently supports: neon
+        #[arg(short, long, value_enum)]
+        simd: Option<SimdArg>,
         /// Disable connecting to seed nodes
         #[arg(long)]
         no_seeds: bool,
-        /// Skip ZK proof verification (INSECURE - for development only)
-        #[arg(long)]
-        skip_proof_verification: bool,
     },
 }
 
@@ -121,12 +150,14 @@ async fn main() -> anyhow::Result<()> {
             blocks,
             difficulty,
             jobs,
+            simd,
         } => {
             cmd_mine(
                 &wallet,
                 blocks,
                 difficulty,
                 jobs,
+                simd.map(Into::into),
                 MiningMode::Mine,
             )?;
         }
@@ -135,12 +166,14 @@ async fn main() -> anyhow::Result<()> {
             blocks,
             difficulty,
             jobs,
+            simd,
         } => {
             cmd_mine(
                 &wallet,
                 blocks,
                 difficulty,
                 jobs,
+                simd.map(Into::into),
                 MiningMode::Benchmark,
             )?;
         }
@@ -150,8 +183,8 @@ async fn main() -> anyhow::Result<()> {
             data_dir,
             mine,
             jobs,
+            simd,
             no_seeds,
-            skip_proof_verification,
         } => {
             // Use config defaults, with CLI/env overrides
             let port = port.unwrap_or_else(config::get_port);
@@ -165,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
             };
             peers.extend(peer);
 
-            cmd_node(port, peers, &data_dir, mine, jobs, skip_proof_verification).await?;
+            cmd_node(port, peers, &data_dir, mine, jobs, simd.map(Into::into)).await?;
         }
     }
 
@@ -206,9 +239,11 @@ fn cmd_mine(
     blocks: u64,
     difficulty: u64,
     jobs: usize,
+    simd: Option<SimdMode>,
     mode: MiningMode,
 ) -> anyhow::Result<()> {
     let jobs = jobs.max(1);
+    let simd = require_simd_support(simd);
     // Load wallet for mining rewards
     let wallet = ShieldedWallet::load(wallet_path)?;
     let miner_pk_hash = wallet.pk_hash();
@@ -222,7 +257,10 @@ fn cmd_mine(
     println!("Miner pk_hash: {}", hex::encode(miner_pk_hash));
     println!("Difficulty: {} leading zero bits", difficulty);
     println!("Threads: {}", jobs);
-    let pool = MiningPool::new(jobs);
+    if let Some(simd) = simd {
+        println!("SIMD mode: {:?}", simd);
+    }
+    let pool = MiningPool::new_with_simd(jobs, simd);
     let mut blockchain = ShieldedBlockchain::with_miner(difficulty, miner_pk_hash, &viewing_key);
     let mut blocks_mined = 0u64;
     let mut total_attempts = 0u64;
@@ -293,11 +331,13 @@ async fn cmd_node(
     data_dir: &str,
     mine_wallet: Option<String>,
     jobs: usize,
-    skip_proof_verification: bool,
+    simd: Option<SimdMode>,
 ) -> anyhow::Result<()> {
     use postera::network::{AppState, MinerStats, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
     use postera::crypto::proof::CircomVerifyingParams;
     use std::sync::RwLock;
+
+    let simd = require_simd_support(simd);
 
     // Create data directory if needed
     std::fs::create_dir_all(data_dir)?;
@@ -331,46 +371,39 @@ async fn cmd_node(
 
     // Initialize blockchain with persistence
     let db_path = format!("{}/blockchain", data_dir);
-    let mut blockchain = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY)?;
+    let blockchain = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY)?;
     let mempool = Mempool::new();
 
     // Load Circom verification keys for proof verification
-    if skip_proof_verification {
-        println!();
-        println!("WARNING: Proof verification is DISABLED (--skip-proof-verification)");
-        println!("         This is INSECURE and should only be used for development.");
-        println!();
-    } else {
-        println!();
-        println!("Loading Circom verification keys...");
+    println!();
+    println!("Loading Circom verification keys...");
 
-        // Look for verification keys in circuits/build/
-        let spend_vkey_path = "circuits/build/spend_vkey.json";
-        let output_vkey_path = "circuits/build/output_vkey.json";
+    // Look for verification keys in circuits/build/
+    let spend_vkey_path = "circuits/build/spend_vkey.json";
+    let output_vkey_path = "circuits/build/output_vkey.json";
 
-        if !std::path::Path::new(spend_vkey_path).exists() {
-            return Err(anyhow::anyhow!(
-                "Spend verification key not found at {}. Run 'npm run build' in circuits/ first.",
-                spend_vkey_path
-            ));
-        }
-        if !std::path::Path::new(output_vkey_path).exists() {
-            return Err(anyhow::anyhow!(
-                "Output verification key not found at {}. Run 'npm run build' in circuits/ first.",
-                output_vkey_path
-            ));
-        }
-
-        println!("  Loading {}...", spend_vkey_path);
-        println!("  Loading {}...", output_vkey_path);
-
-        let verifying_params = CircomVerifyingParams::from_files(spend_vkey_path, output_vkey_path)
-            .map_err(|e| anyhow::anyhow!("Failed to load verification keys: {}", e))?;
-
-        blockchain.set_verifying_params(Arc::new(verifying_params));
-        println!("  ZK proof verification ENABLED (Circom/snarkjs)");
-        println!();
+    if !std::path::Path::new(spend_vkey_path).exists() {
+        return Err(anyhow::anyhow!(
+            "Spend verification key not found at {}. Run 'npm run build' in circuits/ first.",
+            spend_vkey_path
+        ));
     }
+    if !std::path::Path::new(output_vkey_path).exists() {
+        return Err(anyhow::anyhow!(
+            "Output verification key not found at {}. Run 'npm run build' in circuits/ first.",
+            output_vkey_path
+        ));
+    }
+
+    println!("  Loading {}...", spend_vkey_path);
+    println!("  Loading {}...", output_vkey_path);
+
+    let verifying_params = CircomVerifyingParams::from_files(spend_vkey_path, output_vkey_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load verification keys: {}", e))?;
+
+    blockchain.set_verifying_params(Arc::new(verifying_params));
+    println!("  ZK proof verification ENABLED (Circom/snarkjs)");
+    println!();
 
     let state = Arc::new(AppState {
         blockchain: RwLock::new(blockchain),
@@ -437,7 +470,10 @@ async fn cmd_node(
     if let Some((miner_pk_hash, viewing_key)) = miner_info {
         let jobs = jobs.max(1);
         let mine_state = state.clone();
-        let pool = Arc::new(MiningPool::new(jobs));
+        if let Some(simd) = simd {
+            println!("SIMD mode: {:?}", simd);
+        }
+        let pool = Arc::new(MiningPool::new_with_simd(jobs, simd));
 
         tokio::spawn(async move {
             println!("Starting integrated miner...");
