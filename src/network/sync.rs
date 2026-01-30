@@ -13,12 +13,19 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
 
     // Get peer's chain info
     let info_url = format!("{}/chain/info", peer_url);
-    let peer_info: PeerChainInfo = client
+    let response = client
         .get(&info_url)
         .send()
-        .await?
-        .json()
         .await?;
+
+    // Check for rate limiting or other HTTP errors
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(SyncError::HttpError(format!("HTTP {}: {}", status, body)));
+    }
+
+    let peer_info: PeerChainInfo = response.json().await?;
 
     let (local_height, local_hash) = {
         let chain = state.blockchain.read().unwrap();
@@ -55,12 +62,19 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
 
     // Fetch blocks from common ancestor
     let blocks_url = format!("{}/blocks/since/{}", peer_url, sync_from_height);
-    let blocks: Vec<ShieldedBlock> = client
+    let response = client
         .get(&blocks_url)
         .send()
-        .await?
-        .json()
         .await?;
+
+    // Check for rate limiting or other HTTP errors
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(SyncError::HttpError(format!("HTTP {}: {}", status, body)));
+    }
+
+    let blocks: Vec<ShieldedBlock> = response.json().await?;
 
     let mut synced = 0u64;
     let mut reorged = false;
@@ -212,6 +226,8 @@ struct PeerBlockInfo {
 pub enum SyncError {
     #[error("HTTP request failed: {0}")]
     Request(#[from] reqwest::Error),
+    #[error("HTTP error: {0}")]
+    HttpError(String),
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
 }

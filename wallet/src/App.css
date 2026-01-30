@@ -31,9 +31,16 @@ body {
 }
 
 .container {
-  max-width: 720px;
+  width: 100%;
+  max-width: 800px;
   margin: 0 auto;
   padding: 24px;
+}
+
+@media (min-width: 900px) {
+  .container {
+    min-width: 800px;
+  }
 }
 
 h1 {
@@ -173,6 +180,40 @@ label {
   margin-bottom: 18px;
 }
 
+/* Top-level toggle for Explorer/Wallet */
+.nav-toggle {
+  display: flex;
+  gap: 0;
+  margin-bottom: 24px;
+  padding: 4px;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  width: fit-content;
+}
+
+.nav-toggle a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  padding: 12px 32px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.nav-toggle a:hover {
+  color: var(--text-primary);
+}
+
+.nav-toggle a.active {
+  color: white;
+  background: var(--accent-gradient);
+  box-shadow: 0 2px 8px rgba(88, 166, 255, 0.3);
+}
+
+/* Sub-tabs for wallet views */
 .nav-tabs {
   display: flex;
   gap: 8px;

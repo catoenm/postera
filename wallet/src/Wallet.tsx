@@ -300,8 +300,20 @@ export default function Wallet() {
   // Loading state
   if (loading) {
     return (
-      <div className="container">
-        <div className="loading">Loading...</div>
+      <div className="app">
+        <header className="app-header">
+          <Link to="/" className="logo">
+            <img src="/logo.png" alt="Postera" className="logo-img" />
+            <span>Postera</span>
+          </Link>
+          <nav className="main-nav">
+            <Link to="/explorer">Explorer</Link>
+            <Link to="/wallet" className="active">Wallet</Link>
+          </nav>
+        </header>
+        <main className="container">
+          <div className="loading">Loading...</div>
+        </main>
       </div>
     );
   }
@@ -309,70 +321,92 @@ export default function Wallet() {
   // No wallet - show create/import
   if (!wallet) {
     return (
-      <div className="container">
-        <h1>Postera Wallet</h1>
-        <p className="subtitle">Quantum-resistant cryptocurrency wallet</p>
+      <div className="app">
+        <header className="app-header">
+          <Link to="/" className="logo">
+            <img src="/logo.png" alt="Postera" className="logo-img" />
+            <span>Postera</span>
+          </Link>
+          <nav className="main-nav">
+            <Link to="/explorer">Explorer</Link>
+            <Link to="/wallet" className="active">Wallet</Link>
+          </nav>
+        </header>
+        <main className="container">
+          <h1>Create Wallet</h1>
+          <p className="subtitle">Get started with private, quantum-resistant money</p>
 
-        <div className="card info">
-          <strong>Post-Quantum Security</strong>
-          <p>Uses ML-DSA-65 (FIPS 204) for quantum-resistant signatures.</p>
-          <p>All keys are generated and stored locally in your browser.</p>
-        </div>
+          <div className="card info">
+            <strong>Post-Quantum Security</strong>
+            <p>Uses ML-DSA-65 (FIPS 204) for quantum-resistant signatures.</p>
+            <p>All keys are generated and stored locally in your browser.</p>
+          </div>
 
-        <div className="card">
-          <h2>Get Started</h2>
-          <button onClick={createWallet}>Create New Wallet</button>
-          <button className="secondary" onClick={() => setShowImport(true)}>
-            Import Existing Wallet
-          </button>
-        </div>
-
-        {showImport && (
           <div className="card">
-            <h2>Import Wallet</h2>
-            <div className="form-group">
-              <label>Public Key (hex)</label>
-              <textarea
-                value={importPk}
-                onChange={(e) => setImportPk(e.target.value)}
-                placeholder="Enter your public key..."
-              />
-            </div>
-            <div className="form-group">
-              <label>Secret Key (hex)</label>
-              <textarea
-                value={importSk}
-                onChange={(e) => setImportSk(e.target.value)}
-                placeholder="Enter your secret key..."
-              />
-            </div>
-            <button onClick={importWallet}>Import</button>
-            <button className="secondary" onClick={() => setShowImport(false)}>
-              Cancel
+            <h2>Get Started</h2>
+            <button onClick={createWallet}>Create New Wallet</button>
+            <button className="secondary" onClick={() => setShowImport(true)}>
+              Import Existing Wallet
             </button>
           </div>
-        )}
+
+          {showImport && (
+            <div className="card">
+              <h2>Import Wallet</h2>
+              <div className="form-group">
+                <label>Public Key (hex)</label>
+                <textarea
+                  value={importPk}
+                  onChange={(e) => setImportPk(e.target.value)}
+                  placeholder="Enter your public key..."
+                />
+              </div>
+              <div className="form-group">
+                <label>Secret Key (hex)</label>
+                <textarea
+                  value={importSk}
+                  onChange={(e) => setImportSk(e.target.value)}
+                  placeholder="Enter your secret key..."
+                />
+              </div>
+              <button onClick={importWallet}>Import</button>
+              <button className="secondary" onClick={() => setShowImport(false)}>
+                Cancel
+              </button>
+            </div>
+          )}
+        </main>
       </div>
     );
   }
 
   // Wallet view
   return (
-    <div className="container">
-      <h1>Postera Wallet</h1>
-      <p className="subtitle">Quantum-resistant cryptocurrency</p>
+    <div className="app">
+      <header className="app-header">
+        <div className="app-header-inner">
+          <Link to="/" className="logo">
+            <img src="/logo.png" alt="Postera" className="logo-img" />
+            <span>Postera</span>
+          </Link>
+          <nav className="main-nav">
+            <Link to="/explorer">Explorer</Link>
+            <Link to="/wallet" className="active">Wallet</Link>
+          </nav>
+        </div>
+      </header>
 
-      <nav className="nav-tabs">
-        <Link to="/explorer">Explorer</Link>
-        <a className={view === 'wallet' ? 'active' : ''} onClick={() => setView('wallet')}>
-          Wallet
-        </a>
-        <a className={view === 'send' ? 'active' : ''} onClick={() => setView('send')}>
-          Send
-        </a>
-        <a className={view === 'receive' ? 'active' : ''} onClick={() => setView('receive')}>
-          Receive
-        </a>
+      <main className="container">
+        <nav className="nav-tabs">
+          <a className={view === 'wallet' ? 'active' : ''} onClick={() => setView('wallet')}>
+            Balance
+          </a>
+          <a className={view === 'send' ? 'active' : ''} onClick={() => setView('send')}>
+            Send
+          </a>
+          <a className={view === 'receive' ? 'active' : ''} onClick={() => setView('receive')}>
+            Receive
+          </a>
         <a className={view === 'sign' ? 'active' : ''} onClick={() => setView('sign')}>
           Sign
         </a>
@@ -380,16 +414,21 @@ export default function Wallet() {
 
       {view === 'wallet' && (
         <>
-          <div className="card">
-            <h2>Shielded Balance</h2>
-            <div className="balance shielded">
-              {scanning ? (
-                <span className="scanning">Scanning...</span>
-              ) : (
-                <>
-                  {balance} <span className="currency">PSTR</span>
-                </>
-              )}
+          <div className="card balance-card">
+            <div className="balance-display">
+              <img src="/logo.png" alt="PSTR" className="balance-logo" />
+              <div className="balance-info">
+                <div className="balance shielded">
+                  {scanning ? (
+                    <span className="scanning">Scanning...</span>
+                  ) : (
+                    <>
+                      {balance} <span className="currency">PSTR</span>
+                    </>
+                  )}
+                </div>
+                <p className="balance-label">Shielded Balance</p>
+              </div>
             </div>
             {!scanning && (
               <p className="note-count">
@@ -568,6 +607,7 @@ export default function Wallet() {
           )}
         </div>
       )}
+      </main>
     </div>
   );
 }

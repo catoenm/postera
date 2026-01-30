@@ -30,10 +30,152 @@ body {
   min-height: 100vh;
 }
 
+/* App layout */
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  backdrop-filter: blur(12px);
+  padding: 8px 24px;
+}
+
+.app-header-inner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.app-header .logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  padding: 0;
+  margin: 0;
+}
+
+.app-header .logo span {
+  font-size: 1.2rem;
+  font-weight: 700;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1;
+  padding: 0;
+  margin: 0;
+}
+
+.app-header .logo-img {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  display: block;
+}
+
+.main-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.main-nav a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  padding: 8px 16px;
+  font-weight: 500;
+  font-size: 0.9rem;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.main-nav a:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.main-nav a.active {
+  color: white;
+  background: var(--accent-gradient);
+}
+
+/* Balance display with logo */
+.balance-card {
+  padding: 32px;
+}
+
+.balance-display {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 16px;
+}
+
+.balance-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 16px;
+  box-shadow: 0 4px 16px rgba(88, 166, 255, 0.3);
+}
+
+.balance-info {
+  flex: 1;
+}
+
+.balance-label {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 4px;
+}
+
 .container {
-  max-width: 1200px;
+  width: 100%;
+  max-width: 800px;
   margin: 0 auto;
   padding: 24px;
+  flex: 1;
+}
+
+@media (min-width: 900px) {
+  .container {
+    min-width: 800px;
+  }
+}
+
+@media (max-width: 600px) {
+  .app-header {
+    padding: 8px 16px;
+  }
+
+  .app-header .logo-img {
+    width: 28px;
+    height: 28px;
+  }
+
+  .app-header .logo span {
+    font-size: 1rem;
+  }
+
+  .main-nav a {
+    padding: 6px 12px;
+    font-size: 0.85rem;
+  }
+
+  .container {
+    padding: 16px;
+  }
 }
 
 h1 {
@@ -75,6 +217,40 @@ h2 {
   border-color: rgba(88, 166, 255, 0.3);
 }
 
+/* Top-level toggle for Explorer/Wallet */
+.nav-toggle {
+  display: flex;
+  gap: 0;
+  margin-bottom: 24px;
+  padding: 4px;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  width: fit-content;
+}
+
+.nav-toggle a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  padding: 12px 32px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.nav-toggle a:hover {
+  color: var(--text-primary);
+}
+
+.nav-toggle a.active {
+  color: white;
+  background: var(--accent-gradient);
+  box-shadow: 0 2px 8px rgba(88, 166, 255, 0.3);
+}
+
+/* Sub-tabs for wallet views */
 .nav-tabs {
   display: flex;
   gap: 8px;

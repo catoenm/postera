@@ -149,16 +149,22 @@ export default function Explorer() {
   };
 
   return (
-    <div className="container">
-      <nav className="nav-tabs">
-        <Link to="/explorer" className="active">Explorer</Link>
-        <Link to="/wallet">Wallet</Link>
-      </nav>
+    <div className="app">
+      <header className="app-header">
+        <div className="app-header-inner">
+          <Link to="/" className="logo">
+            <img src="/logo.png" alt="Postera" className="logo-img" />
+            <span>Postera</span>
+          </Link>
+          <nav className="main-nav">
+            <Link to="/explorer" className="active">Explorer</Link>
+            <Link to="/wallet">Wallet</Link>
+          </nav>
+        </div>
+      </header>
 
-      <h1>Postera Explorer</h1>
-      <p className="subtitle">Quantum-resistant blockchain explorer</p>
-
-      <input
+      <main className="container">
+        <input
         type="text"
         className="search"
         placeholder="Search by block hash or address..."
@@ -410,6 +416,7 @@ export default function Explorer() {
           </div>
         </div>
       )}
+      </main>
     </div>
   );
 }
