@@ -3,25 +3,18 @@
 //! The wallet tracks owned notes and can:
 //! - Scan blocks to discover incoming notes
 //! - Calculate balance (sum of unspent notes)
-//! - Create shielded transactions
+//!
+//! Note: Transaction proof generation is done in the browser wallet using
+//! snarkjs/Circom. This Rust wallet is for balance tracking and note scanning.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::Arc;
 
-use ark_bn254::Fr;
-
-use crate::core::{
-    BindingSignature, OutputDescription, ShieldedBlock,
-    ShieldedState, ShieldedTransaction, SpendDescription,
-};
+use crate::core::ShieldedBlock;
 use crate::crypto::{
-    commitment::{commit_to_value, NoteCommitment},
+    commitment::NoteCommitment,
     note::{compute_pk_hash, Note, ViewingKey},
     nullifier::{derive_nullifier, Nullifier, NullifierKey},
-    poseidon::{bytes32_to_field, field_to_bytes32, poseidon_hash, DOMAIN_NULLIFIER, DOMAIN_MERKLE_NODE, DOMAIN_NOTE_COMMITMENT},
-    proof::{generate_output_proof, generate_spend_proof, ProvingParams, ZkProof},
-    circuits::{OutputCircuit, SpendCircuit},
     sign, Address, KeyPair,
 };
 
@@ -70,6 +63,14 @@ impl WalletNote {
 }
 
 /// A shielded wallet with privacy features.
+///
+/// This wallet is used for:
+/// - Generating keypairs (Dilithium for ownership proofs)
+/// - Scanning blocks for incoming notes
+/// - Tracking balance (sum of unspent notes)
+///
+/// Note: ZK proof generation for transactions is done in the browser wallet
+/// using snarkjs/Circom. This Rust wallet doesn't generate proofs.
 pub struct ShieldedWallet {
     /// The signing keypair (Dilithium for ownership proofs).
     keypair: KeyPair,
@@ -81,8 +82,6 @@ pub struct ShieldedWallet {
     pk_hash: [u8; 32],
     /// Notes owned by this wallet.
     notes: Vec<WalletNote>,
-    /// Optional proving parameters (expensive to generate).
-    proving_params: Option<Arc<ProvingParams>>,
     /// Last scanned block height.
     last_scanned_height: u64,
 }
@@ -103,7 +102,6 @@ impl ShieldedWallet {
             viewing_key,
             pk_hash,
             notes: Vec::new(),
-            proving_params: None,
             last_scanned_height: 0,
         }
     }
@@ -150,7 +148,6 @@ impl ShieldedWallet {
             viewing_key,
             pk_hash,
             notes,
-            proving_params: None,
             last_scanned_height: stored.last_scanned_height,
         })
     }
@@ -203,11 +200,6 @@ impl ShieldedWallet {
     /// Get the nullifier key.
     pub fn nullifier_key(&self) -> &NullifierKey {
         &self.nullifier_key
-    }
-
-    /// Set the proving parameters.
-    pub fn set_proving_params(&mut self, params: Arc<ProvingParams>) {
-        self.proving_params = Some(params);
     }
 
     /// Get the current balance (sum of unspent notes).
@@ -299,210 +291,6 @@ impl ShieldedWallet {
         }
     }
 
-    /// Select notes to spend for a given amount.
-    /// Returns indices of notes to spend.
-    fn select_notes(&self, amount: u64) -> Option<Vec<usize>> {
-        let mut selected = Vec::new();
-        let mut total = 0u64;
-
-        // Simple greedy selection (could be optimized)
-        for (i, note) in self.notes.iter().enumerate() {
-            if !note.is_spent {
-                selected.push(i);
-                total += note.note.value;
-                if total >= amount {
-                    return Some(selected);
-                }
-            }
-        }
-
-        None // Not enough funds
-    }
-
-    /// Create a shielded transaction with real ZK proofs.
-    ///
-    /// # Arguments
-    /// * `state` - Current blockchain state for witness generation
-    /// * `outputs` - List of (pk_hash, amount) pairs for outputs
-    /// * `fee` - Transaction fee
-    ///
-    /// # Returns
-    /// A signed shielded transaction, or an error.
-    pub fn create_transaction(
-        &mut self,
-        state: &ShieldedState,
-        outputs: Vec<([u8; 32], u64)>,
-        fee: u64,
-    ) -> Result<ShieldedTransaction, WalletError> {
-        let total_output: u64 = outputs.iter().map(|(_, v)| *v).sum();
-        let total_needed = total_output + fee;
-
-        // Select notes to spend
-        let note_indices = self
-            .select_notes(total_needed)
-            .ok_or(WalletError::InsufficientFunds)?;
-
-        let total_input: u64 = note_indices
-            .iter()
-            .map(|&i| self.notes[i].note.value)
-            .sum();
-
-        let change = total_input - total_needed;
-
-        let mut rng = ark_std::rand::thread_rng();
-
-        // Get proving params (required for proof generation)
-        let proving_params = self.proving_params.as_ref()
-            .ok_or(WalletError::NoProvingParams)?;
-
-        // Create spend descriptions
-        let mut spends = Vec::new();
-        for &idx in &note_indices {
-            let note = &mut self.notes[idx];
-
-            // Get witness from state
-            let witness = state
-                .get_witness(note.position)
-                .ok_or(WalletError::WitnessNotFound)?;
-
-            // Create value commitment
-            let value_commitment = commit_to_value(note.note.value, &mut rng);
-            let value_commitment_hash = value_commitment.commitment_hash();
-
-            // Compute nullifier
-            let nullifier = note.nullifier(&self.nullifier_key);
-
-            // Convert witness data to field elements for circuit
-            let merkle_root_fe = bytes32_to_field(&witness.root);
-            let nullifier_fe = bytes32_to_field(&nullifier.to_bytes());
-            let value_commitment_hash_fe = bytes32_to_field(&value_commitment_hash);
-
-            // Convert merkle path to field elements
-            let merkle_path_fe: Vec<Fr> = witness.path.auth_path
-                .iter()
-                .map(bytes32_to_field)
-                .collect();
-
-            // Create spend circuit
-            let circuit = SpendCircuit::new(
-                merkle_root_fe,
-                nullifier_fe,
-                value_commitment_hash_fe,
-                note.note.value,
-                bytes32_to_field(&note.note.recipient_pk_hash),
-                note.note.randomness,
-                self.nullifier_key.to_field_element(),
-                merkle_path_fe,
-                note.position,
-                value_commitment.randomness,
-            );
-
-            // Generate real spend proof
-            let proof = generate_spend_proof(circuit, proving_params.as_ref(), &mut rng)
-                .map_err(|_| WalletError::ProofGenerationFailed)?;
-
-            // Sign the spend
-            let mut sign_msg = Vec::new();
-            sign_msg.extend_from_slice(&witness.root);
-            sign_msg.extend_from_slice(nullifier.as_ref());
-            sign_msg.extend_from_slice(&value_commitment_hash);
-
-            let signature = sign(&sign_msg, &self.keypair);
-
-            spends.push(SpendDescription {
-                anchor: witness.root,
-                nullifier,
-                value_commitment: value_commitment_hash,
-                proof,
-                signature,
-                public_key: self.keypair.public_key_bytes().to_vec(),
-            });
-        }
-
-        // Create output descriptions
-        let mut output_descs = Vec::new();
-
-        for (recipient_pk_hash, amount) in outputs {
-            let output_note = Note::new(amount, recipient_pk_hash, &mut rng);
-            let commitment = output_note.commitment();
-            let value_commitment = commit_to_value(amount, &mut rng);
-            let value_commitment_hash = value_commitment.commitment_hash();
-
-            // Encrypt note for recipient using their pk_hash
-            // (recipient can decrypt using their own pk_hash)
-            let recipient_key = ViewingKey::from_pk_hash(recipient_pk_hash);
-            let encrypted = recipient_key.encrypt_note(&output_note, &mut rng);
-
-            // Create output circuit
-            let circuit = OutputCircuit::new(
-                bytes32_to_field(&commitment.to_bytes()),
-                bytes32_to_field(&value_commitment_hash),
-                amount,
-                bytes32_to_field(&recipient_pk_hash),
-                output_note.randomness,
-                value_commitment.randomness,
-            );
-
-            // Generate real output proof
-            let proof = generate_output_proof(circuit, proving_params.as_ref(), &mut rng)
-                .map_err(|_| WalletError::ProofGenerationFailed)?;
-
-            output_descs.push(OutputDescription {
-                note_commitment: commitment,
-                value_commitment: value_commitment_hash,
-                encrypted_note: encrypted,
-                proof,
-            });
-        }
-
-        // Add change output if needed
-        if change > 0 {
-            let change_note = Note::new(change, self.pk_hash, &mut rng);
-            let commitment = change_note.commitment();
-            let value_commitment = commit_to_value(change, &mut rng);
-            let value_commitment_hash = value_commitment.commitment_hash();
-            // Encrypt change note using our own pk_hash (so we can decrypt it)
-            let change_key = ViewingKey::from_pk_hash(self.pk_hash);
-            let encrypted = change_key.encrypt_note(&change_note, &mut rng);
-
-            // Create output circuit for change
-            let circuit = OutputCircuit::new(
-                bytes32_to_field(&commitment.to_bytes()),
-                bytes32_to_field(&value_commitment_hash),
-                change,
-                bytes32_to_field(&self.pk_hash),
-                change_note.randomness,
-                value_commitment.randomness,
-            );
-
-            // Generate proof for change output
-            let proof = generate_output_proof(circuit, proving_params.as_ref(), &mut rng)
-                .map_err(|_| WalletError::ProofGenerationFailed)?;
-
-            output_descs.push(OutputDescription {
-                note_commitment: commitment,
-                value_commitment: value_commitment_hash,
-                encrypted_note: encrypted,
-                proof,
-            });
-        }
-
-        // Create binding signature (simplified - full implementation would use commitment arithmetic)
-        let binding_sig = BindingSignature::new(vec![0u8; 64]);
-
-        // Mark spent notes
-        for &idx in &note_indices {
-            self.notes[idx].mark_spent();
-        }
-
-        Ok(ShieldedTransaction::new(
-            spends,
-            output_descs,
-            fee,
-            binding_sig,
-        ))
-    }
-
     /// Get the last scanned block height.
     pub fn last_scanned_height(&self) -> u64 {
         self.last_scanned_height
@@ -540,18 +328,6 @@ pub enum WalletError {
 
     #[error("Invalid key data")]
     InvalidKey,
-
-    #[error("Insufficient funds")]
-    InsufficientFunds,
-
-    #[error("Witness not found for note")]
-    WitnessNotFound,
-
-    #[error("Proving parameters not set")]
-    NoProvingParams,
-
-    #[error("Proof generation failed")]
-    ProofGenerationFailed,
 }
 
 // ============================================================================
@@ -685,27 +461,4 @@ mod tests {
         assert_eq!(wallet.unspent_count(), 2);
     }
 
-    #[test]
-    fn test_note_selection() {
-        let mut wallet = ShieldedWallet::generate();
-
-        // Add notes
-        let mut rng = ark_std::rand::thread_rng();
-        for value in [100, 200, 300] {
-            let note = Note::new(value, wallet.pk_hash(), &mut rng);
-            let commitment = note.commitment();
-            wallet.notes.push(WalletNote::new(note, commitment, 0, 0));
-        }
-
-        // Select for 250 (should pick 100 + 200 or similar)
-        let selected = wallet.select_notes(250).unwrap();
-        let total: u64 = selected
-            .iter()
-            .map(|&i| wallet.notes[i].note.value)
-            .sum();
-        assert!(total >= 250);
-
-        // Select for 1000 (should fail)
-        assert!(wallet.select_notes(1000).is_none());
-    }
 }

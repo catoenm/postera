@@ -12,7 +12,7 @@ use crate::consensus::{
 };
 use crate::crypto::{
     note::{Note, ViewingKey},
-    proof::VerifyingParams,
+    proof::CircomVerifyingParams,
 };
 use crate::storage::Database;
 
@@ -37,8 +37,8 @@ pub struct ShieldedBlockchain {
     db: Option<Arc<Database>>,
     /// Orphan blocks (blocks whose parent we don't have yet).
     orphans: HashMap<[u8; 32], ShieldedBlock>,
-    /// Verifying parameters for zk-SNARK proof verification.
-    verifying_params: Option<Arc<VerifyingParams>>,
+    /// Verifying parameters for zk-SNARK proof verification (Circom circuits).
+    verifying_params: Option<Arc<CircomVerifyingParams>>,
 }
 
 impl ShieldedBlockchain {
@@ -201,12 +201,12 @@ impl ShieldedBlockchain {
     }
 
     /// Set the verifying parameters for proof verification.
-    pub fn set_verifying_params(&mut self, params: Arc<VerifyingParams>) {
+    pub fn set_verifying_params(&mut self, params: Arc<CircomVerifyingParams>) {
         self.verifying_params = Some(params);
     }
 
     /// Get the verifying parameters for proof verification.
-    pub fn verifying_params(&self) -> Option<&Arc<VerifyingParams>> {
+    pub fn verifying_params(&self) -> Option<&Arc<CircomVerifyingParams>> {
         self.verifying_params.as_ref()
     }
 

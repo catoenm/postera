@@ -16,10 +16,10 @@ import { getWitnessByPosition } from './api';
 import {
   generateSpendProof,
   generateOutputProof,
-  proofToBytes,
   areProvingKeysLoaded,
   type SpendWitness,
   type OutputWitness,
+  type SnarkJsProof,
 } from './prover';
 import {
   bytes32ToBigint,
@@ -58,7 +58,7 @@ export interface SpendDescription {
   anchor: string;           // hex string
   nullifier: number[];      // byte array [u8; 32]
   value_commitment: string; // hex string
-  proof: number[];          // byte array
+  proof: SnarkJsProof;      // snarkjs proof object (NOT bytes)
   signature: string;        // hex string
   public_key: string;       // hex string
 }
@@ -70,7 +70,7 @@ export interface OutputDescription {
     ciphertext: number[];    // byte array
     ephemeral_pk: number[];  // byte array
   };
-  proof: number[];           // byte array
+  proof: SnarkJsProof;       // snarkjs proof object (NOT bytes)
 }
 
 export interface ShieldedTransaction {
@@ -227,7 +227,7 @@ async function createSpendDescription(
   note: WalletNote,
   secretKey: Uint8Array,
   publicKey: Uint8Array,
-  valueCommitmentBytes: Uint8Array
+  _valueCommitmentBytes: Uint8Array // Pedersen commitment (used for binding sig in caller)
 ): Promise<SpendDescription> {
   // Get Merkle witness from server
   let witness: WitnessResponse;
@@ -241,12 +241,11 @@ async function createSpendDescription(
   const nullifierHex = note.nullifier!;
   const nullifierBytes = hexToBytes(nullifierHex);
 
-  // Use the provided Pedersen value commitment
-  const valueCommitmentHex = bytesToHex(valueCommitmentBytes);
-
   // Compute value commitment hash for the ZK circuit public input
+  // This is what the circuit uses as public input (Poseidon hash of value)
   const valueCommitmentHashFe = computeValueCommitmentHash(note.value);
   const valueCommitmentHashBytes = bigintToBytes32(valueCommitmentHashFe);
+  const valueCommitmentHashHex = bytesToHex(valueCommitmentHashBytes);
 
   // Convert note data to field elements for the witness
   const merkleRootFe = bytes32ToBigint(hexToBytes(witness.root));
@@ -306,21 +305,22 @@ async function createSpendDescription(
 
   // Generate ZK proof
   const { proof } = await generateSpendProof(spendWitness);
-  const proofBytes = proofToBytes(proof);
 
   // Sign the spend authorization
+  // Message must match what Rust verifies: anchor + nullifier + value_commitment
+  // value_commitment contains the hash (same as ZK public input)
   const message = new Uint8Array([
     ...hexToBytes(anchor),
     ...nullifierBytes,
-    ...valueCommitmentHashBytes,
+    ...valueCommitmentHashBytes, // Use hash (same as sent in value_commitment field)
   ]);
   const signature = sign(message, secretKey);
 
   return {
     anchor,
     nullifier: toByteArray(nullifierBytes),
-    value_commitment: valueCommitmentHex,
-    proof: toByteArray(proofBytes),
+    value_commitment: valueCommitmentHashHex, // Send hash (matches ZK public input)
+    proof: proof as SnarkJsProof, // Send proof object directly
     signature: bytesToHex(signature),
     public_key: bytesToHex(publicKey),
   };
@@ -330,7 +330,7 @@ async function createOutputDescription(
   recipientPkHashHex: string,
   amount: bigint,
   viewingKey: Uint8Array,
-  valueCommitmentBytes: Uint8Array
+  _valueCommitmentBytes: Uint8Array // Pedersen commitment (used for binding sig in caller)
 ): Promise<OutputDescription> {
   const pkHash = hexToBytes(recipientPkHashHex);
   const randomness = generateRandomness();
@@ -339,11 +339,9 @@ async function createOutputDescription(
   const commitment = computeNoteCommitment(amount, pkHash, randomness);
   const noteCommitmentFe = bytes32ToBigint(commitment);
 
-  // Use the provided Pedersen value commitment
-  const valueCommitmentHex = bytesToHex(valueCommitmentBytes);
-
   // Compute value commitment hash for the ZK circuit public input
   const valueCommitmentHashFe = computeValueCommitmentHash(amount);
+  const valueCommitmentHashHex = bytesToHex(bigintToBytes32(valueCommitmentHashFe));
 
   // Build output witness for circuit
   const outputWitness: OutputWitness = {
@@ -356,19 +354,18 @@ async function createOutputDescription(
 
   // Generate ZK proof
   const { proof } = await generateOutputProof(outputWitness);
-  const proofBytes = proofToBytes(proof);
 
   // Encrypt note for recipient using viewing key
   const encrypted = encryptNote(amount, pkHash, randomness, viewingKey);
 
   return {
     note_commitment: toByteArray(commitment),
-    value_commitment: valueCommitmentHex,
+    value_commitment: valueCommitmentHashHex, // Send hash (matches ZK public input)
     encrypted_note: {
       ciphertext: toByteArray(encrypted.ciphertext),
       ephemeral_pk: toByteArray(encrypted.ephemeralPk),
     },
-    proof: toByteArray(proofBytes),
+    proof: proof as SnarkJsProof, // Send proof object directly
   };
 }
 

@@ -25,12 +25,6 @@ enum MiningMode {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate ZK proving/verifying parameters (one-time setup)
-    Setup {
-        /// Output directory for parameter files
-        #[arg(short, long, default_value = "params")]
-        output_dir: String,
-    },
     /// Generate a new shielded wallet
     NewWallet {
         /// Output file for the wallet (default: wallet.json)
@@ -116,9 +110,6 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Setup { output_dir } => {
-            cmd_setup(&output_dir)?;
-        }
         Commands::NewWallet { output } => {
             cmd_new_wallet(&output)?;
         }
@@ -177,69 +168,6 @@ async fn main() -> anyhow::Result<()> {
             cmd_node(port, peers, &data_dir, mine, jobs, skip_proof_verification).await?;
         }
     }
-
-    Ok(())
-}
-
-fn cmd_setup(output_dir: &str) -> anyhow::Result<()> {
-    use postera::crypto::setup::{save_proving_params, save_verifying_params};
-    use postera::crypto::generate_parameters;
-
-    println!("===========================================");
-    println!("   Postera ZK Parameter Generation");
-    println!("===========================================");
-    println!();
-    println!("This generates the proving and verifying parameters");
-    println!("for the zk-SNARK circuits. This is a one-time setup.");
-    println!();
-    println!("Output directory: {}", output_dir);
-    println!();
-
-    // Create output directory
-    std::fs::create_dir_all(output_dir)?;
-
-    let proving_path = format!("{}/proving.params", output_dir);
-    let verifying_path = format!("{}/verifying.params", output_dir);
-
-    // Check if files already exist
-    if std::path::Path::new(&proving_path).exists() && std::path::Path::new(&verifying_path).exists() {
-        println!("Parameter files already exist:");
-        println!("  - {}", proving_path);
-        println!("  - {}", verifying_path);
-        println!();
-        println!("To regenerate, delete these files first.");
-        return Ok(());
-    }
-
-    println!("Generating parameters (this takes 2-5 minutes)...");
-    println!();
-
-    let start = std::time::Instant::now();
-    let mut rng = ark_std::rand::rngs::OsRng;
-
-    let (proving_params, verifying_params) = generate_parameters(&mut rng)
-        .map_err(|e| anyhow::anyhow!("Parameter generation failed: {}", e))?;
-
-    let elapsed = start.elapsed();
-    println!("Parameters generated in {:.1}s", elapsed.as_secs_f64());
-    println!();
-
-    // Save parameters
-    println!("Saving proving parameters to {}...", proving_path);
-    save_proving_params(&proving_params, &proving_path)?;
-
-    println!("Saving verifying parameters to {}...", verifying_path);
-    save_verifying_params(&verifying_params, &verifying_path)?;
-
-    println!();
-    println!("Done! You can now:");
-    println!();
-    println!("  1. Check params/verifying.params into git (safe to distribute)");
-    println!("  2. Keep params/proving.params private or distribute to wallet users");
-    println!();
-    println!("  Nodes only need verifying.params");
-    println!("  Wallets need proving.params to create transactions");
-    println!();
 
     Ok(())
 }
@@ -368,7 +296,7 @@ async fn cmd_node(
     skip_proof_verification: bool,
 ) -> anyhow::Result<()> {
     use postera::network::{AppState, MinerStats, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
-    use postera::crypto::get_or_generate_parameters;
+    use postera::crypto::proof::CircomVerifyingParams;
     use std::sync::RwLock;
 
     // Create data directory if needed
@@ -406,7 +334,7 @@ async fn cmd_node(
     let mut blockchain = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY)?;
     let mempool = Mempool::new();
 
-    // Load or generate ZK verifying parameters for proof verification
+    // Load Circom verification keys for proof verification
     if skip_proof_verification {
         println!();
         println!("WARNING: Proof verification is DISABLED (--skip-proof-verification)");
@@ -414,45 +342,33 @@ async fn cmd_node(
         println!();
     } else {
         println!();
-        println!("Loading ZK verification parameters...");
+        println!("Loading Circom verification keys...");
 
-        // Check multiple locations for verifying params:
-        // 1. Data directory (node-specific cache)
-        // 2. params/ directory (pre-generated, checked into git)
-        let data_dir_path = format!("{}/verifying.params", data_dir);
-        let repo_params_path = "params/verifying.params";
+        // Look for verification keys in circuits/build/
+        let spend_vkey_path = "circuits/build/spend_vkey.json";
+        let output_vkey_path = "circuits/build/output_vkey.json";
 
-        let verifying_params = if std::path::Path::new(&data_dir_path).exists() {
-            // Load from data directory (cached)
-            println!("  Loading from {}...", data_dir_path);
-            postera::crypto::setup::load_verifying_params(&data_dir_path)
-                .map_err(|e| anyhow::anyhow!("Failed to load verifying params: {}", e))?
-        } else if std::path::Path::new(repo_params_path).exists() {
-            // Load from repo params/ directory (pre-generated)
-            println!("  Loading from {}...", repo_params_path);
-            let params = postera::crypto::setup::load_verifying_params(repo_params_path)
-                .map_err(|e| anyhow::anyhow!("Failed to load verifying params: {}", e))?;
+        if !std::path::Path::new(spend_vkey_path).exists() {
+            return Err(anyhow::anyhow!(
+                "Spend verification key not found at {}. Run 'npm run build' in circuits/ first.",
+                spend_vkey_path
+            ));
+        }
+        if !std::path::Path::new(output_vkey_path).exists() {
+            return Err(anyhow::anyhow!(
+                "Output verification key not found at {}. Run 'npm run build' in circuits/ first.",
+                output_vkey_path
+            ));
+        }
 
-            // Copy to data directory for faster future loads
-            println!("  Caching to {}...", data_dir_path);
-            postera::crypto::setup::save_verifying_params(&params, &data_dir_path)?;
-            params
-        } else {
-            // Generate new parameters (this takes 2-5 minutes)
-            println!("  No pre-generated params found. Generating new parameters...");
-            println!("  (This takes 2-5 minutes. Run 'postera setup' to pre-generate.)");
-            let mut rng = ark_std::rand::rngs::OsRng;
-            let (_proving, verifying) = get_or_generate_parameters(&mut rng)
-                .map_err(|e| anyhow::anyhow!("Failed to generate parameters: {}", e))?;
+        println!("  Loading {}...", spend_vkey_path);
+        println!("  Loading {}...", output_vkey_path);
 
-            // Save to data directory for future use
-            println!("  Saving to {}...", data_dir_path);
-            postera::crypto::setup::save_verifying_params(&verifying, &data_dir_path)?;
-            verifying
-        };
+        let verifying_params = CircomVerifyingParams::from_files(spend_vkey_path, output_vkey_path)
+            .map_err(|e| anyhow::anyhow!("Failed to load verification keys: {}", e))?;
 
         blockchain.set_verifying_params(Arc::new(verifying_params));
-        println!("  ZK proof verification ENABLED");
+        println!("  ZK proof verification ENABLED (Circom/snarkjs)");
         println!();
     }
 

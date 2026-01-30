@@ -9,12 +9,11 @@
 use std::collections::HashSet;
 
 use crate::crypto::{
-    commitment::NoteCommitment,
     merkle_tree::{CommitmentTree, TreeHash},
     nullifier::Nullifier,
     proof::{
         bytes_to_public_inputs, output_bytes_to_public_inputs, verify_output_proof,
-        verify_spend_proof, VerifyingParams,
+        verify_spend_proof, CircomVerifyingParams,
     },
 };
 
@@ -87,7 +86,7 @@ impl ShieldedState {
     pub fn validate_transaction(
         &self,
         tx: &ShieldedTransaction,
-        verifying_params: &VerifyingParams,
+        verifying_params: &CircomVerifyingParams,
     ) -> Result<(), StateError> {
         // Must have at least one spend or output
         if tx.spends.is_empty() && tx.outputs.is_empty() {
@@ -187,7 +186,7 @@ impl ShieldedState {
     pub fn validate_and_apply(
         &mut self,
         tx: &ShieldedTransaction,
-        verifying_params: &VerifyingParams,
+        verifying_params: &CircomVerifyingParams,
     ) -> Result<(), StateError> {
         self.validate_transaction(tx, verifying_params)?;
         self.apply_transaction(tx);
