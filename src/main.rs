@@ -1,9 +1,9 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use postera::config::{self, GENESIS_DIFFICULTY};
-use postera::consensus::MiningPool;
+use postera::consensus::{MiningPool, SimdMode};
 use postera::core::ShieldedBlockchain;
 use postera::crypto::note::ViewingKey;
 use postera::network::{create_router, Mempool};
@@ -17,6 +17,29 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SimdArg {
+    Neon,
+}
+
+impl From<SimdArg> for SimdMode {
+    fn from(value: SimdArg) -> Self {
+        match value {
+            SimdArg::Neon => SimdMode::Neon,
+        }
+    }
+}
+
+fn require_simd_support(simd: Option<SimdMode>) -> Option<SimdMode> {
+    if let Some(mode) = simd {
+        if !mode.is_supported() {
+            eprintln!("SIMD mode {:?} requires ARMv8 NEON+SHA2 support.", mode);
+            std::process::exit(1);
+        }
+    }
+    simd
+}
+
 #[derive(Clone, Copy)]
 enum MiningMode {
     Mine,
@@ -25,12 +48,6 @@ enum MiningMode {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate ZK proving/verifying parameters (one-time setup)
-    Setup {
-        /// Output directory for parameter files
-        #[arg(short, long, default_value = "params")]
-        output_dir: String,
-    },
     /// Generate a new shielded wallet
     NewWallet {
         /// Output file for the wallet (default: wallet.json)
@@ -60,6 +77,9 @@ enum Commands {
         /// Number of mining threads to use
         #[arg(short, long, default_value = "1")]
         jobs: usize,
+        /// SIMD mode (optional). Currently supports: neon
+        #[arg(short, long, value_enum)]
+        simd: Option<SimdArg>,
     },
     /// Run a mining benchmark (mines N blocks and prints avg hashrate)
     Benchmark {
@@ -75,6 +95,9 @@ enum Commands {
         /// Number of mining threads to use
         #[arg(short, long, default_value = "1")]
         jobs: usize,
+        /// SIMD mode (optional). Currently supports: neon
+        #[arg(short, long, value_enum)]
+        simd: Option<SimdArg>,
     },
     /// Run a full node
     Node {
@@ -93,12 +116,12 @@ enum Commands {
         /// Number of mining threads to use
         #[arg(short, long, default_value = "1")]
         jobs: usize,
+        /// SIMD mode (optional). Currently supports: neon
+        #[arg(short, long, value_enum)]
+        simd: Option<SimdArg>,
         /// Disable connecting to seed nodes
         #[arg(long)]
         no_seeds: bool,
-        /// Skip ZK proof verification (INSECURE - for development only)
-        #[arg(long)]
-        skip_proof_verification: bool,
     },
 }
 
@@ -116,9 +139,6 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Setup { output_dir } => {
-            cmd_setup(&output_dir)?;
-        }
         Commands::NewWallet { output } => {
             cmd_new_wallet(&output)?;
         }
@@ -130,12 +150,14 @@ async fn main() -> anyhow::Result<()> {
             blocks,
             difficulty,
             jobs,
+            simd,
         } => {
             cmd_mine(
                 &wallet,
                 blocks,
                 difficulty,
                 jobs,
+                simd.map(Into::into),
                 MiningMode::Mine,
             )?;
         }
@@ -144,12 +166,14 @@ async fn main() -> anyhow::Result<()> {
             blocks,
             difficulty,
             jobs,
+            simd,
         } => {
             cmd_mine(
                 &wallet,
                 blocks,
                 difficulty,
                 jobs,
+                simd.map(Into::into),
                 MiningMode::Benchmark,
             )?;
         }
@@ -159,8 +183,8 @@ async fn main() -> anyhow::Result<()> {
             data_dir,
             mine,
             jobs,
+            simd,
             no_seeds,
-            skip_proof_verification,
         } => {
             // Use config defaults, with CLI/env overrides
             let port = port.unwrap_or_else(config::get_port);
@@ -174,72 +198,9 @@ async fn main() -> anyhow::Result<()> {
             };
             peers.extend(peer);
 
-            cmd_node(port, peers, &data_dir, mine, jobs, skip_proof_verification).await?;
+            cmd_node(port, peers, &data_dir, mine, jobs, simd.map(Into::into)).await?;
         }
     }
-
-    Ok(())
-}
-
-fn cmd_setup(output_dir: &str) -> anyhow::Result<()> {
-    use postera::crypto::setup::{save_proving_params, save_verifying_params};
-    use postera::crypto::generate_parameters;
-
-    println!("===========================================");
-    println!("   Postera ZK Parameter Generation");
-    println!("===========================================");
-    println!();
-    println!("This generates the proving and verifying parameters");
-    println!("for the zk-SNARK circuits. This is a one-time setup.");
-    println!();
-    println!("Output directory: {}", output_dir);
-    println!();
-
-    // Create output directory
-    std::fs::create_dir_all(output_dir)?;
-
-    let proving_path = format!("{}/proving.params", output_dir);
-    let verifying_path = format!("{}/verifying.params", output_dir);
-
-    // Check if files already exist
-    if std::path::Path::new(&proving_path).exists() && std::path::Path::new(&verifying_path).exists() {
-        println!("Parameter files already exist:");
-        println!("  - {}", proving_path);
-        println!("  - {}", verifying_path);
-        println!();
-        println!("To regenerate, delete these files first.");
-        return Ok(());
-    }
-
-    println!("Generating parameters (this takes 2-5 minutes)...");
-    println!();
-
-    let start = std::time::Instant::now();
-    let mut rng = ark_std::rand::rngs::OsRng;
-
-    let (proving_params, verifying_params) = generate_parameters(&mut rng)
-        .map_err(|e| anyhow::anyhow!("Parameter generation failed: {}", e))?;
-
-    let elapsed = start.elapsed();
-    println!("Parameters generated in {:.1}s", elapsed.as_secs_f64());
-    println!();
-
-    // Save parameters
-    println!("Saving proving parameters to {}...", proving_path);
-    save_proving_params(&proving_params, &proving_path)?;
-
-    println!("Saving verifying parameters to {}...", verifying_path);
-    save_verifying_params(&verifying_params, &verifying_path)?;
-
-    println!();
-    println!("Done! You can now:");
-    println!();
-    println!("  1. Check params/verifying.params into git (safe to distribute)");
-    println!("  2. Keep params/proving.params private or distribute to wallet users");
-    println!();
-    println!("  Nodes only need verifying.params");
-    println!("  Wallets need proving.params to create transactions");
-    println!();
 
     Ok(())
 }
@@ -278,9 +239,11 @@ fn cmd_mine(
     blocks: u64,
     difficulty: u64,
     jobs: usize,
+    simd: Option<SimdMode>,
     mode: MiningMode,
 ) -> anyhow::Result<()> {
     let jobs = jobs.max(1);
+    let simd = require_simd_support(simd);
     // Load wallet for mining rewards
     let wallet = ShieldedWallet::load(wallet_path)?;
     let miner_pk_hash = wallet.pk_hash();
@@ -294,7 +257,10 @@ fn cmd_mine(
     println!("Miner pk_hash: {}", hex::encode(miner_pk_hash));
     println!("Difficulty: {} leading zero bits", difficulty);
     println!("Threads: {}", jobs);
-    let pool = MiningPool::new(jobs);
+    if let Some(simd) = simd {
+        println!("SIMD mode: {:?}", simd);
+    }
+    let pool = MiningPool::new_with_simd(jobs, simd);
     let mut blockchain = ShieldedBlockchain::with_miner(difficulty, miner_pk_hash, &viewing_key);
     let mut blocks_mined = 0u64;
     let mut total_attempts = 0u64;
@@ -365,11 +331,12 @@ async fn cmd_node(
     data_dir: &str,
     mine_wallet: Option<String>,
     jobs: usize,
-    skip_proof_verification: bool,
+    simd: Option<SimdMode>,
 ) -> anyhow::Result<()> {
     use postera::network::{AppState, MinerStats, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
-    use postera::crypto::get_or_generate_parameters;
     use std::sync::RwLock;
+
+    let simd = require_simd_support(simd);
 
     // Create data directory if needed
     std::fs::create_dir_all(data_dir)?;
@@ -403,58 +370,8 @@ async fn cmd_node(
 
     // Initialize blockchain with persistence
     let db_path = format!("{}/blockchain", data_dir);
-    let mut blockchain = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY)?;
+    let blockchain = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY)?;
     let mempool = Mempool::new();
-
-    // Load or generate ZK verifying parameters for proof verification
-    if skip_proof_verification {
-        println!();
-        println!("WARNING: Proof verification is DISABLED (--skip-proof-verification)");
-        println!("         This is INSECURE and should only be used for development.");
-        println!();
-    } else {
-        println!();
-        println!("Loading ZK verification parameters...");
-
-        // Check multiple locations for verifying params:
-        // 1. Data directory (node-specific cache)
-        // 2. params/ directory (pre-generated, checked into git)
-        let data_dir_path = format!("{}/verifying.params", data_dir);
-        let repo_params_path = "params/verifying.params";
-
-        let verifying_params = if std::path::Path::new(&data_dir_path).exists() {
-            // Load from data directory (cached)
-            println!("  Loading from {}...", data_dir_path);
-            postera::crypto::setup::load_verifying_params(&data_dir_path)
-                .map_err(|e| anyhow::anyhow!("Failed to load verifying params: {}", e))?
-        } else if std::path::Path::new(repo_params_path).exists() {
-            // Load from repo params/ directory (pre-generated)
-            println!("  Loading from {}...", repo_params_path);
-            let params = postera::crypto::setup::load_verifying_params(repo_params_path)
-                .map_err(|e| anyhow::anyhow!("Failed to load verifying params: {}", e))?;
-
-            // Copy to data directory for faster future loads
-            println!("  Caching to {}...", data_dir_path);
-            postera::crypto::setup::save_verifying_params(&params, &data_dir_path)?;
-            params
-        } else {
-            // Generate new parameters (this takes 2-5 minutes)
-            println!("  No pre-generated params found. Generating new parameters...");
-            println!("  (This takes 2-5 minutes. Run 'postera setup' to pre-generate.)");
-            let mut rng = ark_std::rand::rngs::OsRng;
-            let (_proving, verifying) = get_or_generate_parameters(&mut rng)
-                .map_err(|e| anyhow::anyhow!("Failed to generate parameters: {}", e))?;
-
-            // Save to data directory for future use
-            println!("  Saving to {}...", data_dir_path);
-            postera::crypto::setup::save_verifying_params(&verifying, &data_dir_path)?;
-            verifying
-        };
-
-        blockchain.set_verifying_params(Arc::new(verifying_params));
-        println!("  ZK proof verification ENABLED");
-        println!();
-    }
 
     let state = Arc::new(AppState {
         blockchain: RwLock::new(blockchain),
@@ -521,7 +438,10 @@ async fn cmd_node(
     if let Some((miner_pk_hash, viewing_key)) = miner_info {
         let jobs = jobs.max(1);
         let mine_state = state.clone();
-        let pool = Arc::new(MiningPool::new(jobs));
+        if let Some(simd) = simd {
+            println!("SIMD mode: {:?}", simd);
+        }
+        let pool = Arc::new(MiningPool::new_with_simd(jobs, simd));
 
         tokio::spawn(async move {
             println!("Starting integrated miner...");

@@ -1,6 +1,8 @@
 //! Proof-of-work mining for shielded blocks.
 
-use crate::core::{BlockHeaderHashPrefix, ShieldedBlock};
+use crate::core::{BlockHeader, BlockHeaderHashPrefix, ShieldedBlock};
+use sha2::compress256;
+use sha2::digest::generic_array::GenericArray;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
@@ -63,6 +65,20 @@ enum WorkerCommand {
     Stop,
 }
 
+/// Optional SIMD mode for mining.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SimdMode {
+    Neon,
+}
+
+impl SimdMode {
+    pub fn is_supported(self) -> bool {
+        match self {
+            SimdMode::Neon => neon_supported(),
+        }
+    }
+}
+
 struct MineJob {
     template: ShieldedBlock,
     found: Arc<AtomicBool>,
@@ -71,15 +87,69 @@ struct MineJob {
     done_tx: mpsc::Sender<()>,
 }
 
+struct FastHashPrefix {
+    state_after_prefix: [u32; 8],
+    tail_block: [u8; 64],
+}
+
+impl FastHashPrefix {
+    fn new(header: &BlockHeader) -> Self {
+        let mut prefix = [0u8; 132];
+        prefix[0..4].copy_from_slice(&header.version.to_le_bytes());
+        prefix[4..36].copy_from_slice(&header.prev_hash);
+        prefix[36..68].copy_from_slice(&header.merkle_root);
+        prefix[68..100].copy_from_slice(&header.commitment_root);
+        prefix[100..132].copy_from_slice(&header.nullifier_root);
+
+        let mut state = SHA256_INIT;
+        let block0 = GenericArray::from_slice(&prefix[0..64]);
+        let block1 = GenericArray::from_slice(&prefix[64..128]);
+        compress256(&mut state, std::slice::from_ref(block0));
+        compress256(&mut state, std::slice::from_ref(block1));
+
+        let mut tail_block = [0u8; 64];
+        tail_block[0..4].copy_from_slice(&prefix[128..132]);
+        tail_block[28] = 0x80;
+        tail_block[56..64].copy_from_slice(&(HEADER_LEN_BYTES as u64 * 8).to_be_bytes());
+
+        Self {
+            state_after_prefix: state,
+            tail_block,
+        }
+    }
+
+    fn meets_difficulty(&mut self, timestamp: u64, difficulty: u64, nonce: u64) -> bool {
+        self.tail_block[4..12].copy_from_slice(&timestamp.to_le_bytes());
+        self.tail_block[12..20].copy_from_slice(&difficulty.to_le_bytes());
+        self.tail_block[20..28].copy_from_slice(&nonce.to_le_bytes());
+
+        let mut state = self.state_after_prefix;
+        let block = GenericArray::from_slice(&self.tail_block);
+        compress256(&mut state, std::slice::from_ref(block));
+
+        let mut hash = [0u8; 32];
+        for (i, word) in state.iter().enumerate() {
+            hash[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+
+        count_leading_zeros_scalar(&hash) >= difficulty as usize
+    }
+}
+
 /// Persistent worker threads for mining multiple blocks efficiently.
 pub struct MiningPool {
     jobs: usize,
+    simd: Option<SimdMode>,
     senders: Vec<mpsc::Sender<WorkerCommand>>,
     handles: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl MiningPool {
     pub fn new(jobs: usize) -> Self {
+        Self::new_with_simd(jobs, None)
+    }
+
+    pub fn new_with_simd(jobs: usize, simd: Option<SimdMode>) -> Self {
         let jobs = jobs.max(1);
         let mut senders = Vec::with_capacity(jobs);
         let mut handles = Vec::with_capacity(jobs);
@@ -88,10 +158,11 @@ impl MiningPool {
             let (tx, rx) = mpsc::channel();
             senders.push(tx);
 
+            let simd = simd;
             let handle = std::thread::spawn(move || {
                 while let Ok(command) = rx.recv() {
                     match command {
-                        WorkerCommand::Mine(job) => run_mining_job(job, worker_id, jobs),
+                        WorkerCommand::Mine(job) => run_mining_job(job, worker_id, jobs, simd),
                         WorkerCommand::Stop => break,
                     }
                 }
@@ -102,6 +173,7 @@ impl MiningPool {
 
         Self {
             jobs,
+            simd,
             senders,
             handles: Mutex::new(handles),
         }
@@ -164,7 +236,7 @@ impl Drop for MiningPool {
     }
 }
 
-fn run_mining_job(job: MineJob, worker_id: usize, jobs: usize) {
+fn run_mining_job(job: MineJob, worker_id: usize, jobs: usize, simd: Option<SimdMode>) {
     let MineJob {
         mut template,
         found,
@@ -177,6 +249,12 @@ fn run_mining_job(job: MineJob, worker_id: usize, jobs: usize) {
 
     let prefix = BlockHeaderHashPrefix::new(&template.header);
     let step = jobs as u64;
+    let use_neon = simd == Some(SimdMode::Neon) && neon_supported();
+    let mut fast_prefix = if use_neon {
+        Some(FastHashPrefix::new(&template.header))
+    } else {
+        None
+    };
     let mut attempts = 0u64;
 
     loop {
@@ -184,7 +262,9 @@ fn run_mining_job(job: MineJob, worker_id: usize, jobs: usize) {
             break;
         }
 
-        if prefix.meets_difficulty(
+        if meets_difficulty_simd(
+            fast_prefix.as_mut(),
+            &prefix,
             template.header.timestamp,
             template.header.difficulty,
             template.header.nonce,
@@ -210,6 +290,57 @@ fn run_mining_job(job: MineJob, worker_id: usize, jobs: usize) {
     attempts_total.fetch_add(attempts, Ordering::Relaxed);
     let _ = done_tx.send(());
 }
+
+fn meets_difficulty_simd(
+    fast_prefix: Option<&mut FastHashPrefix>,
+    prefix: &BlockHeaderHashPrefix,
+    timestamp: u64,
+    difficulty: u64,
+    nonce: u64,
+) -> bool {
+    if let Some(fast) = fast_prefix {
+        fast.meets_difficulty(timestamp, difficulty, nonce)
+    } else {
+        prefix.meets_difficulty(timestamp, difficulty, nonce)
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn neon_supported() -> bool {
+    std::arch::is_aarch64_feature_detected!("neon")
+        && std::arch::is_aarch64_feature_detected!("sha2")
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn neon_supported() -> bool {
+    false
+}
+
+const HEADER_LEN_BYTES: usize = 4 + 32 * 4 + 8 * 3;
+const SHA256_INIT: [u32; 8] = [
+    0x6a09e667,
+    0xbb67ae85,
+    0x3c6ef372,
+    0xa54ff53a,
+    0x510e527f,
+    0x9b05688c,
+    0x1f83d9ab,
+    0x5be0cd19,
+];
+
+fn count_leading_zeros_scalar(bytes: &[u8]) -> usize {
+    let mut zeros = 0;
+    for byte in bytes {
+        if *byte == 0 {
+            zeros += 8;
+        } else {
+            zeros += byte.leading_zeros() as usize;
+            break;
+        }
+    }
+    zeros
+}
+
 
 /// A miner that can be started and stopped.
 pub struct Miner {
