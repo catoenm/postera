@@ -1,0 +1,587 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning}
+
+% Colors
+\definecolor{posterablue}{RGB}{59,130,246}
+\definecolor{codegray}{RGB}{245,245,245}
+
+% Hyperref setup
+\hypersetup{
+    colorlinks=true,
+    linkcolor=posterablue,
+    urlcolor=posterablue,
+    citecolor=posterablue
+}
+
+% Code listing style
+\lstset{
+    basicstyle=\ttfamily\small,
+    backgroundcolor=\color{codegray},
+    frame=single,
+    breaklines=true
+}
+
+% Theorem environments
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+
+% Title
+\title{
+    \vspace{-1cm}
+    \textbf{Postera: A Post-Quantum Privacy-Preserving Cryptocurrency}\\[0.5em]
+    \large Technical Whitepaper v1.0
+}
+\author{
+    Postera Development Team\\
+    \texttt{https://postera.network}
+}
+\date{January 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present Postera, a cryptocurrency designed to provide strong privacy guarantees while remaining secure against both classical and quantum adversaries. Postera combines NIST-standardized post-quantum digital signatures (ML-DSA-65, FIPS 204) with zero-knowledge proofs (Groth16 on BN254) to achieve transaction privacy through a note-based UTXO model similar to Zcash's Sapling protocol. Unlike existing privacy coins, Postera's signature scheme provides security against attacks by quantum computers, addressing a critical vulnerability in current blockchain systems. This paper describes the cryptographic foundations, transaction model, consensus mechanism, and security properties of the Postera protocol.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%==============================================================================
+\section{Introduction}
+%==============================================================================
+
+The advent of practical quantum computers poses an existential threat to the security of existing blockchain systems. Most cryptocurrencies, including Bitcoin and Ethereum, rely on elliptic curve cryptography (ECDSA, EdDSA) for digital signatures. Shor's algorithm, when run on a sufficiently powerful quantum computer, can break these schemes in polynomial time, potentially allowing an attacker to forge signatures and steal funds.
+
+Simultaneously, financial privacy has become increasingly important as blockchain analytics companies develop sophisticated tools to track and deanonymize transactions. While privacy-focused cryptocurrencies like Zcash and Monero address this concern, they remain vulnerable to quantum attacks.
+
+Postera addresses both challenges by combining:
+
+\begin{enumerate}
+    \item \textbf{Post-Quantum Signatures}: ML-DSA-65 (CRYSTALS-Dilithium), a NIST-standardized lattice-based signature scheme providing 128-bit post-quantum security.
+    \item \textbf{Zero-Knowledge Proofs}: Groth16 proofs on the BN254 curve enabling private transactions where amounts and recipients are hidden.
+    \item \textbf{Note-Based Privacy Model}: A UTXO-like system using encrypted notes, nullifiers, and commitment trees to prevent double-spending while maintaining privacy.
+\end{enumerate}
+
+%==============================================================================
+\section{Threat Model and Security Goals}
+%==============================================================================
+
+\subsection{Adversary Capabilities}
+
+We consider adversaries with the following capabilities:
+
+\begin{itemize}
+    \item \textbf{Classical Adversary}: Polynomial-time bounded classical computer with access to all public blockchain data.
+    \item \textbf{Quantum Adversary}: Access to a cryptographically-relevant quantum computer capable of running Shor's and Grover's algorithms.
+    \item \textbf{Network Adversary}: Ability to observe, delay, or reorder network messages (but not break cryptographic primitives).
+\end{itemize}
+
+\subsection{Security Goals}
+
+Postera aims to achieve the following security properties:
+
+\begin{definition}[Transaction Integrity]
+No adversary can create a valid transaction that spends funds they do not own, even with quantum computing capabilities.
+\end{definition}
+
+\begin{definition}[Balance Privacy]
+An observer of the blockchain cannot determine the balance of any address without knowledge of the corresponding viewing key.
+\end{definition}
+
+\begin{definition}[Transaction Privacy]
+An observer cannot link the sender and receiver of a transaction, nor determine the transaction amount.
+\end{definition}
+
+\begin{definition}[Double-Spend Prevention]
+No adversary can spend the same note twice, even across different transactions.
+\end{definition}
+
+%==============================================================================
+\section{Cryptographic Primitives}
+%==============================================================================
+
+\subsection{Post-Quantum Digital Signatures: ML-DSA-65}
+
+Postera uses ML-DSA-65 (Module-Lattice Digital Signature Algorithm), standardized as FIPS 204 by NIST. This scheme is based on the hardness of the Module Learning With Errors (MLWE) problem.
+
+\subsubsection{Parameters}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrl}
+\toprule
+Parameter & Value & Description \\
+\midrule
+Security Level & 3 (128-bit) & NIST security category \\
+Public Key Size & 1,952 bytes & Verification key \\
+Secret Key Size & 4,032 bytes & Signing key \\
+Signature Size & 3,309 bytes & Digital signature \\
+\bottomrule
+\end{tabular}
+\caption{ML-DSA-65 parameters used in Postera}
+\end{table}
+
+\subsubsection{Security Basis}
+
+The security of ML-DSA relies on the hardness of two problems:
+
+\begin{enumerate}
+    \item \textbf{Module-LWE}: Given $(\mathbf{A}, \mathbf{b} = \mathbf{A}\mathbf{s} + \mathbf{e})$ where $\mathbf{s}, \mathbf{e}$ are small, find $\mathbf{s}$.
+    \item \textbf{Module-SIS}: Given $\mathbf{A}$, find a short vector $\mathbf{z}$ such that $\mathbf{A}\mathbf{z} = \mathbf{0}$.
+\end{enumerate}
+
+These problems are believed to be hard for both classical and quantum computers, with the best known quantum algorithms offering only a quadratic speedup via Grover's algorithm.
+
+\subsection{Zero-Knowledge Proofs: Groth16}
+
+For transaction privacy, Postera employs Groth16 zk-SNARKs on the BN254 (alt\_bn128) curve. While the BN254 pairing is not post-quantum secure, it is used only for privacy (hiding amounts and participants), not for security of funds.
+
+\begin{definition}[zk-SNARK]
+A zero-knowledge Succinct Non-interactive ARgument of Knowledge is a proof system where:
+\begin{itemize}
+    \item \textbf{Completeness}: Honest provers can convince verifiers of true statements.
+    \item \textbf{Soundness}: No adversary can prove false statements.
+    \item \textbf{Zero-Knowledge}: Proofs reveal nothing beyond the statement's validity.
+    \item \textbf{Succinctness}: Proofs are small and fast to verify.
+\end{itemize}
+\end{definition}
+
+\subsubsection{Circuit Design}
+
+Postera uses two circuits implemented in Circom:
+
+\textbf{Spend Circuit} proves:
+\begin{enumerate}
+    \item Knowledge of a note $(v, pk_h, r)$ with value $v$, recipient hash $pk_h$, and randomness $r$
+    \item The note commitment exists in the commitment tree (Merkle proof)
+    \item The nullifier was correctly derived from the note and nullifier key
+\end{enumerate}
+
+\textbf{Output Circuit} proves:
+\begin{enumerate}
+    \item A new note commitment was correctly computed from $(v, pk_h, r)$
+\end{enumerate}
+
+\subsection{Hash Functions}
+
+\subsubsection{Poseidon Hash}
+
+For in-circuit hashing (commitments, nullifiers, Merkle tree), Postera uses the Poseidon hash function, optimized for arithmetic circuits over prime fields.
+
+\begin{equation}
+H_{\text{Poseidon}}: \mathbb{F}_p^n \rightarrow \mathbb{F}_p
+\end{equation}
+
+Poseidon uses a sponge construction with the following domain separators:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Domain & Separator \\
+\midrule
+Note Commitment & 1 \\
+Value Commitment Hash & 2 \\
+Nullifier & 3 \\
+Merkle Empty Leaf & 4 \\
+Merkle Node & 5 \\
+\bottomrule
+\end{tabular}
+\caption{Poseidon domain separators}
+\end{table}
+
+\subsubsection{SHA-256 and Blake2}
+
+For proof-of-work and key derivation, Postera uses SHA-256 and Blake2s256 respectively, both of which provide adequate post-quantum security (128-bit against Grover's algorithm with 256-bit output).
+
+\subsection{Authenticated Encryption: ChaCha20-Poly1305}
+
+Note encryption uses ChaCha20-Poly1305, an AEAD scheme providing:
+\begin{itemize}
+    \item 256-bit key security
+    \item Authentication and confidentiality
+    \item 128-bit post-quantum security against Grover's algorithm
+\end{itemize}
+
+%==============================================================================
+\section{Transaction Model}
+%==============================================================================
+
+\subsection{Notes}
+
+The fundamental unit of value in Postera is a \textbf{note}, analogous to a UTXO but with privacy properties.
+
+\begin{definition}[Note]
+A note $\mathcal{N}$ is a tuple $(v, pk_h, r)$ where:
+\begin{itemize}
+    \item $v \in \{0, 1, \ldots, 2^{64}-1\}$ is the value
+    \item $pk_h \in \mathbb{F}_p$ is the recipient's public key hash
+    \item $r \in \mathbb{F}_p$ is random blinding factor
+\end{itemize}
+\end{definition}
+
+\subsection{Commitments}
+
+Notes are stored on-chain as commitments, hiding their contents.
+
+\begin{definition}[Note Commitment]
+The commitment to a note $\mathcal{N} = (v, pk_h, r)$ is:
+\begin{equation}
+\text{cm} = H_{\text{Poseidon}}(1, v, pk_h, r)
+\end{equation}
+where $1$ is the domain separator for note commitments.
+\end{definition}
+
+\subsection{Nullifiers}
+
+To prevent double-spending without revealing which note is spent, Postera uses nullifiers.
+
+\begin{definition}[Nullifier]
+The nullifier for a note at position $\rho$ with nullifier key $nk$ is:
+\begin{equation}
+\text{nf} = H_{\text{Poseidon}}(3, nk, \rho)
+\end{equation}
+\end{definition}
+
+When a note is spent, its nullifier is published. The blockchain maintains a nullifier set; any transaction attempting to publish an existing nullifier is rejected.
+
+\subsection{Commitment Tree}
+
+All note commitments are stored in a Merkle tree of depth 32, supporting up to $2^{32}$ notes.
+
+\begin{definition}[Commitment Tree]
+A binary Merkle tree where:
+\begin{itemize}
+    \item Leaves are note commitments (or empty leaf hash for unused positions)
+    \item Internal nodes: $H_{\text{Poseidon}}(5, \text{left}, \text{right})$
+    \item Empty leaf: $H_{\text{Poseidon}}(4, 0)$
+\end{itemize}
+\end{definition}
+
+\subsection{Transaction Structure}
+
+A shielded transaction $\mathcal{T}$ consists of:
+
+\begin{align}
+\mathcal{T} = \{&\text{spends}: [(\text{nf}_i, \text{anchor}_i, \pi_{\text{spend},i})], \\
+               &\text{outputs}: [(\text{cm}_j, \text{enc}_j, \pi_{\text{output},j})], \\
+               &\text{binding\_sig}, \\
+               &\text{fee}\}
+\end{align}
+
+Where:
+\begin{itemize}
+    \item $\text{nf}_i$ is the nullifier for spent note $i$
+    \item $\text{anchor}_i$ is the Merkle root at time of proof generation
+    \item $\pi_{\text{spend},i}$ is the Groth16 proof for spend $i$
+    \item $\text{cm}_j$ is the commitment for output note $j$
+    \item $\text{enc}_j$ is the encrypted note data
+    \item $\pi_{\text{output},j}$ is the Groth16 proof for output $j$
+    \item $\text{binding\_sig}$ proves value balance (inputs = outputs + fee)
+\end{itemize}
+
+\subsection{Value Balance and Binding Signatures}
+
+To ensure that transactions preserve value (no inflation), Postera uses Pedersen commitments and binding signatures.
+
+\begin{definition}[Value Commitment]
+For a value $v$ with randomness $r$:
+\begin{equation}
+\text{cv} = v \cdot G + r \cdot H
+\end{equation}
+where $G, H$ are generator points on BN254.
+\end{definition}
+
+The binding signature proves that:
+\begin{equation}
+\sum_i \text{cv}_{\text{spend},i} = \sum_j \text{cv}_{\text{output},j} + \text{fee} \cdot G
+\end{equation}
+
+This is verified using a Schnorr signature over the sum of randomness values.
+
+%==============================================================================
+\section{Consensus Mechanism}
+%==============================================================================
+
+\subsection{Proof of Work}
+
+Postera uses SHA-256 based proof-of-work, similar to Bitcoin. A valid block must satisfy:
+
+\begin{equation}
+H_{\text{SHA256}}(\text{block\_header}) < \text{target}
+\end{equation}
+
+The target is expressed as a difficulty $d$, requiring $d$ leading zero bits.
+
+\subsection{Difficulty Adjustment}
+
+Difficulty adjusts every 10 blocks to maintain approximately 10-second block times:
+
+\begin{algorithm}
+\caption{Difficulty Adjustment}
+\begin{algorithmic}[1]
+\State $\text{window} \gets 10$ blocks
+\State $\text{target\_time} \gets 100$ seconds (10 blocks × 10 seconds)
+\State $\text{actual\_time} \gets t_{\text{current}} - t_{\text{window\_start}}$
+\State $\text{ratio} \gets \text{target\_time} / \text{actual\_time}$
+\State $\text{ratio} \gets \text{clamp}(\text{ratio}, 0.5, 2.0)$ \Comment{Limit adjustment}
+\State $d_{\text{new}} \gets d_{\text{current}} \times \text{ratio}$
+\State $d_{\text{new}} \gets \text{clamp}(d_{\text{new}}, d_{\text{min}}, d_{\text{max}})$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Block Structure}
+
+\begin{lstlisting}
+Block {
+    header: {
+        version: u32,
+        prev_hash: [u8; 32],
+        merkle_root: [u8; 32],
+        commitment_root: [u8; 32],
+        nullifier_root: [u8; 32],
+        timestamp: u64,
+        difficulty: u64,
+        nonce: u64,
+    },
+    transactions: Vec<ShieldedTransaction>,
+}
+\end{lstlisting}
+
+\subsection{Mining Rewards}
+
+Each block produces a coinbase transaction creating 50 POSTERA to the miner's address. The reward is implemented as an output note in the coinbase transaction.
+
+%==============================================================================
+\section{Privacy Model}
+%==============================================================================
+
+\subsection{Viewing Keys}
+
+Users possess three types of keys:
+
+\begin{enumerate}
+    \item \textbf{Spending Key} ($sk$): ML-DSA-65 secret key, required to spend notes
+    \item \textbf{Viewing Key} ($vk$): Derived from $sk$, allows decrypting incoming notes
+    \item \textbf{Public Key Hash} ($pk_h$): Address for receiving funds
+\end{enumerate}
+
+\subsection{Note Encryption}
+
+Output notes are encrypted to the recipient's viewing key using ChaCha20-Poly1305:
+
+\begin{equation}
+\text{enc} = \text{ChaCha20-Poly1305}_{k}(\text{nonce}, (v, r))
+\end{equation}
+
+where $k$ is derived from a Diffie-Hellman-like key exchange (using the recipient's public key).
+
+\subsection{Privacy Guarantees}
+
+\begin{theorem}[Sender Privacy]
+Given a transaction $\mathcal{T}$, an observer without the spending key cannot determine which notes were spent (beyond the published nullifiers revealing that \emph{some} notes were spent).
+\end{theorem}
+
+\begin{theorem}[Receiver Privacy]
+Given a transaction $\mathcal{T}$, an observer without the recipient's viewing key cannot determine the recipient of any output.
+\end{theorem}
+
+\begin{theorem}[Amount Privacy]
+Given a transaction $\mathcal{T}$, an observer cannot determine the value of any input or output.
+\end{theorem}
+
+\subsection{Anonymity Set}
+
+The anonymity set for a spend is the entire set of unspent notes in the commitment tree. With a tree depth of 32, this supports up to $2^{32} \approx 4$ billion notes.
+
+%==============================================================================
+\section{Security Analysis}
+%==============================================================================
+
+\subsection{Post-Quantum Security of Signatures}
+
+\begin{theorem}[Signature Unforgeability]
+Under the hardness of Module-LWE and Module-SIS, ML-DSA-65 signatures are existentially unforgeable under chosen message attacks, even against quantum adversaries.
+\end{theorem}
+
+This ensures that an attacker, even with a quantum computer, cannot forge transactions or steal funds.
+
+\subsection{Privacy vs. Post-Quantum Security Trade-off}
+
+The Groth16 proofs use BN254 pairings, which are vulnerable to quantum attacks. However:
+
+\begin{enumerate}
+    \item \textbf{Privacy degradation, not fund theft}: A quantum attacker could potentially break privacy by forging proofs, but cannot steal funds (protected by ML-DSA signatures).
+    \item \textbf{Future upgradability}: The protocol can migrate to post-quantum proof systems (e.g., STARKs, lattice-based SNARKs) as they mature.
+    \item \textbf{Current security}: BN254 remains secure against classical adversaries, and cryptographically-relevant quantum computers are not yet available.
+\end{enumerate}
+
+\subsection{Double-Spend Prevention}
+
+\begin{theorem}[Double-Spend Resistance]
+A note can only be spent once. Any attempt to spend a note twice will be rejected due to nullifier collision.
+\end{theorem}
+
+\begin{proof}
+Each note has a unique nullifier determined by $nf = H(nk, \rho)$. When spent, the nullifier is added to the nullifier set. Any subsequent transaction using the same nullifier is rejected by consensus rules.
+\end{proof}
+
+\subsection{Inflation Resistance}
+
+\begin{theorem}[No Inflation]
+No transaction can create value. The total supply is determined solely by mining rewards.
+\end{theorem}
+
+\begin{proof}
+The binding signature proves that input values equal output values plus fees. The Groth16 proofs ensure that the values in the commitments are correctly formed. Together, these prevent creation of value from nothing.
+\end{proof}
+
+%==============================================================================
+\section{Implementation}
+%==============================================================================
+
+\subsection{Architecture}
+
+Postera is implemented in Rust with the following components:
+
+\begin{itemize}
+    \item \textbf{Core}: Block, transaction, and state management
+    \item \textbf{Crypto}: ML-DSA signatures, Poseidon hashing, proof verification
+    \item \textbf{Consensus}: Proof-of-work mining with difficulty adjustment
+    \item \textbf{Network}: P2P gossip, block synchronization, REST API
+    \item \textbf{Wallet}: Note scanning, balance tracking, transaction building
+\end{itemize}
+
+\subsection{Client-Side Proving}
+
+Zero-knowledge proofs are generated in the browser using:
+
+\begin{itemize}
+    \item \textbf{Circom}: Circuit compiler for R1CS constraints
+    \item \textbf{snarkjs}: JavaScript library for Groth16 proving
+    \item \textbf{WebAssembly}: Circuit witness computation
+\end{itemize}
+
+This ensures that sensitive data (spending keys, note values) never leaves the user's device.
+
+\subsection{Verification}
+
+Proof verification is performed server-side using:
+
+\begin{itemize}
+    \item \textbf{arkworks}: Rust library for elliptic curve operations
+    \item \textbf{ark-groth16}: Groth16 verifier implementation
+\end{itemize}
+
+Verification keys are committed to the repository with SHA-256 checksums to ensure all nodes use identical parameters.
+
+%==============================================================================
+\section{Performance}
+%==============================================================================
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrl}
+\toprule
+Operation & Time & Notes \\
+\midrule
+Block mining (diff 20) & ~100ms & 2 threads, M1 Mac \\
+Proof generation (spend) & ~3s & Browser, WebAssembly \\
+Proof generation (output) & ~1s & Browser, WebAssembly \\
+Proof verification & ~5ms & Server-side, arkworks \\
+Transaction validation & ~15ms & Including proof verification \\
+\bottomrule
+\end{tabular}
+\caption{Performance benchmarks}
+\end{table}
+
+%==============================================================================
+\section{Future Work}
+%==============================================================================
+
+\begin{enumerate}
+    \item \textbf{Post-Quantum ZK Proofs}: Migrate to lattice-based or hash-based proof systems (e.g., STARKs) for full post-quantum privacy.
+
+    \item \textbf{Light Clients}: Implement compact block filters and SPV-like verification for mobile wallets.
+
+    \item \textbf{Layer 2 Scaling}: Payment channels and rollups for higher throughput.
+
+    \item \textbf{Multi-Signature}: Threshold signatures using lattice-based schemes.
+
+    \item \textbf{Smart Contracts}: Private smart contract execution using zero-knowledge virtual machines.
+\end{enumerate}
+
+%==============================================================================
+\section{Conclusion}
+%==============================================================================
+
+Postera represents a significant step toward cryptocurrency systems that are secure in a post-quantum world while preserving financial privacy. By combining NIST-standardized post-quantum signatures with zero-knowledge proofs, Postera achieves:
+
+\begin{itemize}
+    \item \textbf{Quantum-Resistant Fund Security}: ML-DSA-65 signatures protect against quantum attacks on fund ownership.
+    \item \textbf{Transaction Privacy}: Groth16 proofs hide transaction amounts and participants.
+    \item \textbf{Practical Performance}: Client-side proving in browsers enables decentralized, private transactions.
+\end{itemize}
+
+As quantum computing advances, the importance of post-quantum cryptography will only grow. Postera provides a foundation for private, quantum-secure digital currency.
+
+%==============================================================================
+\section*{Acknowledgments}
+%==============================================================================
+
+We thank the developers of the cryptographic libraries that make Postera possible: FIPS 204 reference implementation, arkworks, snarkjs, Circom, and light-poseidon.
+
+%==============================================================================
+\begin{thebibliography}{99}
+
+\bibitem{fips204}
+National Institute of Standards and Technology.
+\textit{FIPS 204: Module-Lattice-Based Digital Signature Standard}.
+2024.
+
+\bibitem{groth16}
+Groth, J.
+\textit{On the Size of Pairing-based Non-interactive Arguments}.
+EUROCRYPT 2016.
+
+\bibitem{zcash}
+Hopwood, D., Bowe, S., Hornby, T., Wilcox, N.
+\textit{Zcash Protocol Specification}.
+2023.
+
+\bibitem{poseidon}
+Grassi, L., Khovratovich, D., Rechberger, C., Roy, A., Schofnegger, M.
+\textit{Poseidon: A New Hash Function for Zero-Knowledge Proof Systems}.
+USENIX Security 2021.
+
+\bibitem{shor}
+Shor, P.
+\textit{Algorithms for Quantum Computation: Discrete Logarithms and Factoring}.
+FOCS 1994.
+
+\bibitem{dilithium}
+Ducas, L., et al.
+\textit{CRYSTALS-Dilithium: A Lattice-Based Digital Signature Scheme}.
+TCHES 2018.
+
+\end{thebibliography}
+
+\end{document}

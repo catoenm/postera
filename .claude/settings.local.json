@@ -104,7 +104,16 @@
       "Bash(flyctl ssh console:*)",
       "Bash(flyctl apps restart:*)",
       "Bash(flyctl logs:*)",
-      "Bash(flyctl volumes list:*)"
+      "Bash(flyctl volumes list:*)",
+      "Bash(git show:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfix: serve landing page at root path\n\nMove \"/\" route from api_routes \\(plain text\\) to ui_routes \\(React app\\)\nso the landing page renders correctly at postera.network.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -c commit.gpgsign=false add src/network/api.rs)",
+      "Bash(git -c commit.gpgsign=false commit -m \"$\\(cat <<''EOF''\nfix: serve landing page at root path\n\nMove \"/\" route from api_routes \\(plain text\\) to ui_routes \\(React app\\)\nso the landing page renders correctly at postera.network.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -c commit.gpgsign=false commit -m \"$\\(cat <<''EOF''\nfix: serve logo.png and vite.svg at root path\n\nAdd routes for root-level static files so the landing page\nlogo displays correctly.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(pdflatex:*)",
+      "Bash(brew list:*)",
+      "Bash(git -c commit.gpgsign=false commit -m \"$\\(cat <<''EOF''\nfeat: add favicon using logo.png\n\n- Update index.html to use logo.png as favicon\n- Add apple-touch-icon for mobile devices\n- Serve /favicon.ico for legacy browser support\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(tectonic:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

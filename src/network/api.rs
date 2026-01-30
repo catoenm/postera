@@ -118,7 +118,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Root-level static files
         .route_service("/logo.png", ServeFile::new("static/logo.png"))
         .route_service("/vite.svg", ServeFile::new("static/vite.svg"))
-        .route_service("/favicon.ico", ServeFile::new("static/logo.png"));
+        .route_service("/favicon.ico", ServeFile::new("static/logo.png"))
+        .route_service("/postera-whitepaper.pdf", ServeFile::new("static/postera-whitepaper.pdf"));
 
     Router::new().merge(api_routes).merge(ui_routes)
 }

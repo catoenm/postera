@@ -137,10 +137,9 @@ export default function Landing() {
             For a complete technical specification of the protocol, cryptographic primitives,
             and security proofs, read the whitepaper.
           </p>
-          <a href="/whitepaper.pdf" className="whitepaper-link" target="_blank" rel="noopener noreferrer">
+          <a href="/postera-whitepaper.pdf" className="whitepaper-link" target="_blank" rel="noopener noreferrer">
             Download Whitepaper (PDF)
           </a>
-          <p className="coming-soon">Coming Soon</p>
         </section>
 
         <footer className="footer">
