@@ -103,7 +103,8 @@
       "Bash(done)",
       "Bash(flyctl ssh console:*)",
       "Bash(flyctl apps restart:*)",
-      "Bash(flyctl logs:*)"
+      "Bash(flyctl logs:*)",
+      "Bash(flyctl volumes list:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

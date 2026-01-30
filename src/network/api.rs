@@ -29,10 +29,10 @@ use super::Mempool;
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 /// Rate limit: requests per second per IP
-const RATE_LIMIT_RPS: u64 = 50;
+const RATE_LIMIT_RPS: u64 = 1000;
 
 /// Rate limit: burst size (max requests before throttling)
-const RATE_LIMIT_BURST: u32 = 100;
+const RATE_LIMIT_BURST: u32 = 2000;
 
 /// Shared application state for the API.
 pub struct AppState {
