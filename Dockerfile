@@ -52,8 +52,10 @@ COPY --from=frontend-builder /app/static ./static
 # Copy wallet file for mining
 COPY wallet.json ./wallet.json
 
-# Copy circuit verification keys for ZK proof verification (from committed keys directory)
-COPY circuits/keys ./circuits/keys
+# Copy circuit verification keys for ZK proof verification
+# Note: main.rs expects keys at circuits/build/
+COPY circuits/keys/spend_vkey.json ./circuits/build/spend_vkey.json
+COPY circuits/keys/output_vkey.json ./circuits/build/output_vkey.json
 
 # Create data directory
 RUN mkdir -p /app/data
