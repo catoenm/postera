@@ -75,7 +75,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     info!("Request body limit: {} bytes", MAX_BODY_SIZE);
 
     let api_routes = Router::new()
-        .route("/", get(index))
         .route("/chain/info", get(chain_info))
         .route("/miner/stats", get(miner_stats))
         .route("/block/:hash", get(get_block))
@@ -107,6 +106,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     let ui_routes = Router::new()
         // React app routes - serve index.html for SPA
+        .route("/", get(serve_index))
         .route("/wallet", get(serve_index))
         .route("/wallet/*path", get(serve_index))
         .route("/explorer", get(serve_index))
@@ -117,10 +117,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest_service("/circuits", ServeDir::new("static/circuits"));
 
     Router::new().merge(api_routes).merge(ui_routes)
-}
-
-async fn index() -> &'static str {
-    "Postera Shielded Node API v0.2.0"
 }
 
 async fn chain_info(State(state): State<Arc<AppState>>) -> Json<ChainInfo> {
