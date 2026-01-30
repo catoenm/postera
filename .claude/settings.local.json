@@ -94,7 +94,16 @@
       "Bash(git merge:*)",
       "Bash(git -c user.email=\"noreply@anthropic.com\" -c user.name=\"Claude\" commit -m \"$\\(cat <<''EOF''\nMerge origin/main: combine SIMD mining with Circom verification\n\nResolved merge conflict to keep both:\n- SIMD mining support from origin/main\n- CircomVerifyingParams for ZK proof verification\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(flyctl status:*)",
-      "Bash(flyctl deploy:*)"
+      "Bash(flyctl deploy:*)",
+      "Bash(shasum:*)",
+      "Bash(git -c user.email=\"noreply@anthropic.com\" -c user.name=\"Claude\" commit -m \"$\\(cat <<''EOF''\nfix: Docker build includes miner_monitor binary and ZK verification keys\n\n- Create dummy src/bin/miner_monitor.rs for dependency caching step\n- Copy circuits/build/*.json verification keys for ZK proof verification\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -c commit.gpgsign=false -c user.email=\"noreply@anthropic.com\" -c user.name=\"Claude\" add Dockerfile)",
+      "Bash(git -c commit.gpgsign=false -c user.email=\"noreply@anthropic.com\" -c user.name=\"Claude\" commit -m \"$\\(cat <<''EOF''\nfix: Docker build includes miner_monitor binary and ZK verification keys\n\n- Create dummy src/bin/miner_monitor.rs for dependency caching step\n- Copy circuits verification keys for ZK proof verification\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git -c commit.gpgsign=false -c user.email=\"noreply@anthropic.com\" -c user.name=\"Claude\" commit -m \"$\\(cat <<''EOF''\nfix: copy verification keys to circuits/build/ path expected by main.rs\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(done)",
+      "Bash(flyctl ssh console:*)",
+      "Bash(flyctl apps restart:*)",
+      "Bash(flyctl logs:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

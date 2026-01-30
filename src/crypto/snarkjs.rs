@@ -191,18 +191,31 @@ pub fn verify_proof_json(
 mod tests {
     use super::*;
 
+    fn find_vkey(name: &str) -> String {
+        // Check committed keys first, then build directory
+        let committed = format!("circuits/keys/{}", name);
+        let build = format!("circuits/build/{}", name);
+        if std::path::Path::new(&committed).exists() {
+            committed
+        } else {
+            build
+        }
+    }
+
     #[test]
     fn test_load_output_vkey() {
-        let vk = CircomVerifyingKey::from_file("circuits/build/output_vkey.json");
-        assert!(vk.is_ok(), "Failed to load output vkey: {:?}", vk.err());
+        let path = find_vkey("output_vkey.json");
+        let vk = CircomVerifyingKey::from_file(&path);
+        assert!(vk.is_ok(), "Failed to load output vkey from {}: {:?}", path, vk.err());
         let vk = vk.unwrap();
         assert_eq!(vk.n_public, 2);
     }
 
     #[test]
     fn test_load_spend_vkey() {
-        let vk = CircomVerifyingKey::from_file("circuits/build/spend_vkey.json");
-        assert!(vk.is_ok(), "Failed to load spend vkey: {:?}", vk.err());
+        let path = find_vkey("spend_vkey.json");
+        let vk = CircomVerifyingKey::from_file(&path);
+        assert!(vk.is_ok(), "Failed to load spend vkey from {}: {:?}", path, vk.err());
         let vk = vk.unwrap();
         assert_eq!(vk.n_public, 3);
     }

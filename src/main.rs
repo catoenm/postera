@@ -40,6 +40,61 @@ fn require_simd_support(simd: Option<SimdMode>) -> Option<SimdMode> {
     simd
 }
 
+/// Expected SHA256 checksums for verification keys (for integrity verification)
+const SPEND_VKEY_SHA256: &str = "a1ff15d0968e066b6d8285993580f57065d67fb7ce5625ed7966fd13a8952e27";
+const OUTPUT_VKEY_SHA256: &str = "c97a5eb20c85009a2abd2f85b1bece88c054e913a24423e1973e0629537ff038";
+
+/// Find verification keys, checking committed keys first, then build directory.
+/// Also verifies checksums for committed keys to ensure integrity.
+fn find_verification_keys() -> anyhow::Result<(String, String)> {
+    use sha2::{Sha256, Digest};
+    use std::path::Path;
+
+    // Paths to check (in order of preference)
+    let committed_spend = "circuits/keys/spend_vkey.json";
+    let committed_output = "circuits/keys/output_vkey.json";
+    let build_spend = "circuits/build/spend_vkey.json";
+    let build_output = "circuits/build/output_vkey.json";
+
+    // Check committed keys first (production)
+    if Path::new(committed_spend).exists() && Path::new(committed_output).exists() {
+        // Verify checksums for committed keys
+        let spend_data = std::fs::read(committed_spend)?;
+        let output_data = std::fs::read(committed_output)?;
+
+        let spend_hash = hex::encode(Sha256::digest(&spend_data));
+        let output_hash = hex::encode(Sha256::digest(&output_data));
+
+        if spend_hash != SPEND_VKEY_SHA256 {
+            return Err(anyhow::anyhow!(
+                "Spend verification key checksum mismatch!\n  Expected: {}\n  Got: {}\n  File may be corrupted or tampered with.",
+                SPEND_VKEY_SHA256, spend_hash
+            ));
+        }
+        if output_hash != OUTPUT_VKEY_SHA256 {
+            return Err(anyhow::anyhow!(
+                "Output verification key checksum mismatch!\n  Expected: {}\n  Got: {}\n  File may be corrupted or tampered with.",
+                OUTPUT_VKEY_SHA256, output_hash
+            ));
+        }
+
+        println!("  Using committed verification keys (checksums verified)");
+        return Ok((committed_spend.to_string(), committed_output.to_string()));
+    }
+
+    // Fall back to build directory (local development)
+    if Path::new(build_spend).exists() && Path::new(build_output).exists() {
+        println!("  Using local build verification keys (development mode)");
+        return Ok((build_spend.to_string(), build_output.to_string()));
+    }
+
+    Err(anyhow::anyhow!(
+        "Verification keys not found.\n\
+         For production: Ensure circuits/keys/ directory is present (from git).\n\
+         For development: Run 'npm run compile:all && npm run setup:spend && npm run setup:output' in circuits/"
+    ))
+}
+
 #[derive(Clone, Copy)]
 enum MiningMode {
     Mine,
@@ -371,7 +426,7 @@ async fn cmd_node(
 
     // Initialize blockchain with persistence
     let db_path = format!("{}/blockchain", data_dir);
-    let blockchain = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY)?;
+    let mut blockchain = ShieldedBlockchain::open(&db_path, GENESIS_DIFFICULTY)?;
     let mempool = Mempool::new();
 
     // Load Circom verification keys for proof verification
@@ -384,7 +439,7 @@ async fn cmd_node(
     println!("  Loading {}...", spend_vkey_path);
     println!("  Loading {}...", output_vkey_path);
 
-    let verifying_params = CircomVerifyingParams::from_files(spend_vkey_path, output_vkey_path)
+    let verifying_params = CircomVerifyingParams::from_files(&spend_vkey_path, &output_vkey_path)
         .map_err(|e| anyhow::anyhow!("Failed to load verification keys: {}", e))?;
 
     blockchain.set_verifying_params(Arc::new(verifying_params));
