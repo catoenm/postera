@@ -64,7 +64,7 @@ This generates a wallet with:
 ./target/release/postera node --peer https://postera.network
 
 # Join and mine to your wallet (use --jobs to set mining threads)
-./target/release/postera node --mine wallet.json --jobs 8 --peer https://postera.network
+./target/release/postera node --mine my-wallet.json --jobs 8 --peer https://postera.network
 
 # Start a standalone node on default port 8333
 ./target/release/postera node
@@ -82,7 +82,7 @@ Run the TUI miner monitor alongside your mining node:
 
 ```bash
 # In a separate terminal
-./target/release/postera-miner-monitor --wallet wallet.json --node http://localhost:8333
+./target/release/postera-miner-monitor --wallet my-wallet.json --node http://localhost:8333
 ```
 
 The monitor displays:
@@ -142,13 +142,13 @@ CLI support coming soon:
 ### Standalone Mining
 
 ```bash
-./target/release/postera mine --wallet wallet.json --difficulty 20 --jobs 8
+./target/release/postera mine --wallet my-wallet.json --difficulty 20 --jobs 8
 ```
 
 ### Benchmark Mining
 
 ```bash
-./target/release/postera benchmark --wallet wallet.json --difficulty 20 --jobs 8 --blocks 20
+./target/release/postera benchmark --wallet my-wallet.json --difficulty 20 --jobs 8 --blocks 20
 ```
 
 ## Environment Variables
