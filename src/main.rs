@@ -101,6 +101,88 @@ enum MiningMode {
     Benchmark,
 }
 
+#[derive(serde::Deserialize)]
+struct PeerChainInfo {
+    height: u64,
+    latest_hash: String,
+}
+
+async fn fetch_peer_chain_info(
+    client: &reqwest::Client,
+    peer_url: &str,
+) -> Option<PeerChainInfo> {
+    let info_url = format!("{}/chain/info", peer_url);
+    let response = client.get(&info_url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json::<PeerChainInfo>().await.ok()
+}
+
+async fn wait_for_initial_sync(
+    state: Arc<postera::network::AppState>,
+    max_wait_secs: u64,
+) -> anyhow::Result<()> {
+    use std::time::{Duration, Instant};
+    use tokio::time::sleep;
+
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(max_wait_secs);
+
+    loop {
+        let peers = { state.peers.read().unwrap().clone() };
+        if peers.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No peers available; cannot verify sync before mining."
+            ));
+        }
+
+        let (local_height, local_hash) = {
+            let chain = state.blockchain.read().unwrap();
+            (chain.height(), hex::encode(chain.latest_hash()))
+        };
+
+        let mut best_peer: Option<(String, PeerChainInfo)> = None;
+        for peer in &peers {
+            if let Some(info) = fetch_peer_chain_info(&client, peer).await {
+                let take = match &best_peer {
+                    None => true,
+                    Some((_, best_info)) => info.height > best_info.height,
+                };
+                if take {
+                    best_peer = Some((peer.clone(), info));
+                }
+            }
+        }
+
+        if let Some((peer_url, info)) = best_peer {
+            if local_height == info.height && local_hash == info.latest_hash {
+                println!(
+                    "Local chain matches peer {} at height {}.",
+                    peer_url, local_height
+                );
+                return Ok(());
+            }
+
+            println!(
+                "Waiting for sync... local height={}, peer height={}",
+                local_height, info.height
+            );
+            let _ = postera::network::sync_from_peer(state.clone(), &peer_url).await;
+        } else {
+            println!("Waiting for sync... no peer info available yet.");
+        }
+
+        if Instant::now() >= deadline {
+            return Err(anyhow::anyhow!(
+                "Timed out waiting for sync; local tip does not match any peer."
+            ));
+        }
+
+        sleep(Duration::from_secs(5)).await;
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Generate a new shielded wallet
@@ -509,6 +591,9 @@ async fn cmd_node(
 
     // Start integrated miner if requested
     if let Some((miner_pk_hash, viewing_key)) = miner_info {
+        println!("Waiting for initial sync before mining...");
+        wait_for_initial_sync(state.clone(), 300).await?;
+
         let jobs = jobs.max(1);
         let mine_state = state.clone();
         if let Some(simd) = simd {

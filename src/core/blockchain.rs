@@ -49,7 +49,6 @@ impl ShieldedBlockchain {
 
         let mut blocks = HashMap::new();
         blocks.insert(genesis_hash, genesis);
-
         // Initialize state with genesis coinbase
         let mut state = ShieldedState::new();
         state.apply_coinbase(&genesis_coinbase);
@@ -99,6 +98,7 @@ impl ShieldedBlockchain {
             let mut state = ShieldedState::new();
 
             // Load all blocks and rebuild state
+            let total_blocks = height + 1;
             for h in 0..=height {
                 let block = db
                     .load_block_by_height(h)
@@ -117,6 +117,15 @@ impl ShieldedBlockchain {
 
                 blocks.insert(hash, block);
                 height_index.push(hash);
+
+                if h == height || h % 500 == 0 {
+                    use std::io::{self, Write};
+                    print!("\rLoading blocks: {}/{}", h + 1, total_blocks);
+                    let _ = io::stdout().flush();
+                    if h == height {
+                        println!();
+                    }
+                }
             }
 
             // Load difficulty from metadata or use last block's difficulty

@@ -37,7 +37,10 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
     let peer_ahead = peer_info.height > local_height;
 
     if !peer_ahead && !is_fork {
-        info!("Peer {} is not ahead (peer: {}, local: {})", peer_url, peer_info.height, local_height);
+        info!(
+            "Peer {} is not ahead (peer: {}, local: {})",
+            peer_url, peer_info.height, local_height
+        );
         return Ok(0);
     }
 
@@ -78,8 +81,10 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
 
     let mut synced = 0u64;
     let mut reorged = false;
+    let total_blocks = blocks.len() as u64;
+    let show_progress = total_blocks > 0;
 
-    for block in blocks {
+    for (idx, block) in blocks.into_iter().enumerate() {
         let mut chain = state.blockchain.write().unwrap();
         match chain.try_add_block(block) {
             Ok(true) => {
@@ -95,6 +100,18 @@ pub async fn sync_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<u64,
             Err(e) => {
                 warn!("Failed to add block during sync: {}", e);
                 break;
+            }
+        }
+
+        if show_progress {
+            let current = (idx as u64) + 1;
+            if current == total_blocks || current % 100 == 0 {
+                use std::io::{self, Write};
+                print!("\rSyncing blocks: {}/{}", current, total_blocks);
+                let _ = io::stdout().flush();
+                if current == total_blocks {
+                    println!();
+                }
             }
         }
     }
