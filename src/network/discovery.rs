@@ -4,6 +4,10 @@ use tracing::{info, warn};
 
 use super::AppState;
 
+fn is_localhost_peer(peer: &str) -> bool {
+    peer.contains("://localhost") || peer.contains("://127.0.0.1")
+}
+
 /// Discover peers from known peers and add them to our peer list.
 pub async fn discover_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<Vec<String>, DiscoveryError> {
     let client = reqwest::Client::new();
@@ -24,7 +28,7 @@ pub async fn discover_from_peer(state: Arc<AppState>, peer_url: &str) -> Result<
         let mut our_peers = state.peers.write().unwrap();
         for peer in response.peers {
             // Don't add ourselves or duplicates
-            if !our_peers.contains(&peer) && peer != peer_url {
+            if !our_peers.contains(&peer) && peer != peer_url && !is_localhost_peer(&peer) {
                 our_peers.push(peer.clone());
                 new_peers.push(peer);
             }
@@ -110,7 +114,11 @@ pub async fn announce_to_peer(
         .json()
         .await?;
 
-    Ok(response.peers)
+    Ok(response
+        .peers
+        .into_iter()
+        .filter(|peer| !is_localhost_peer(peer))
+        .collect())
 }
 
 #[derive(Debug, serde::Deserialize)]
