@@ -76,6 +76,26 @@ The node exposes:
 - Block Explorer at `http://localhost:8333/explorer`
 - Web Wallet at `http://localhost:8333/wallet`
 
+### Public URL (Expose Your Local Node)
+
+If you want other peers to reach a node running on your machine, you need to
+announce a public URL with `--public-url`.
+
+Example using Cloudflare Tunnel:
+
+```bash
+# Terminal 1: create the tunnel to localhost:8333
+cloudflared tunnel --url http://localhost:8333
+
+# Terminal 2: run the node
+./target/release/postera node \
+  --public-url https://your-tunnel.trycloudflare.com \
+  --mine my-wallet.json --jobs 8 --peer https://postera.network
+```
+
+Copy the `trycloudflare.com` URL from the tunnel output and pass it to
+`--public-url` so peers can reach your node.
+
 ### Monitor Mining Progress
 
 Run the TUI miner monitor alongside your mining node:
