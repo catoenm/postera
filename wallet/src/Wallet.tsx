@@ -301,17 +301,17 @@ export default function Wallet() {
   if (loading) {
     return (
       <div className="app">
+        <header className="app-header">
+          <Link to="/" className="logo">
+            <img src="/logo.png" alt="Postera" className="logo-img" />
+            <span>Postera</span>
+          </Link>
+          <nav className="main-nav">
+            <Link to="/explorer">Explorer</Link>
+            <Link to="/wallet" className="active">Wallet</Link>
+          </nav>
+        </header>
         <main className="container">
-          <header className="app-header">
-        <Link to="/" className="logo">
-          <img src="/logo.png" alt="Postera" className="logo-img" />
-          <span>Postera</span>
-        </Link>
-        <nav className="main-nav">
-          <Link to="/explorer">Explorer</Link>
-          <Link to="/wallet" className="active">Wallet</Link>
-        </nav>
-      </header>
           <nav className="nav-tabs">
             <a className="active">Balance</a>
             <a>Send</a>
@@ -328,17 +328,17 @@ export default function Wallet() {
   if (!wallet) {
     return (
       <div className="app">
+        <header className="app-header">
+          <Link to="/" className="logo">
+            <img src="/logo.png" alt="Postera" className="logo-img" />
+            <span>Postera</span>
+          </Link>
+          <nav className="main-nav">
+            <Link to="/explorer">Explorer</Link>
+            <Link to="/wallet" className="active">Wallet</Link>
+          </nav>
+        </header>
         <main className="container">
-          <header className="app-header">
-        <Link to="/" className="logo">
-          <img src="/logo.png" alt="Postera" className="logo-img" />
-          <span>Postera</span>
-        </Link>
-        <nav className="main-nav">
-          <Link to="/explorer">Explorer</Link>
-          <Link to="/wallet" className="active">Wallet</Link>
-        </nav>
-      </header>
           <nav className="nav-tabs">
             <a className="active">Balance</a>
             <a>Send</a>
