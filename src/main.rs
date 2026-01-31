@@ -611,12 +611,16 @@ async fn cmd_node(
 
         let jobs = jobs.max(1);
         let mine_state = state.clone();
+        let announce_url = our_url.clone();
+        let local_url = format!("http://localhost:{}", port);
+        let local_ip_url = format!("http://127.0.0.1:{}", port);
         if let Some(simd) = simd {
             println!("SIMD mode: {:?}", simd);
         }
         let pool = Arc::new(MiningPool::new_with_simd(jobs, simd));
 
         tokio::spawn(async move {
+            let client = reqwest::Client::new();
             println!("Starting integrated miner...");
             println!("Mining threads: {}", jobs);
             {
@@ -716,9 +720,34 @@ async fn cmd_node(
                 }
 
                 // Broadcast to peers (use current peer list for newly discovered peers)
-                let current_peers = mine_state.peers.read().unwrap().clone();
+                let mut current_peers = mine_state.peers.read().unwrap().clone();
+                current_peers.retain(|peer| {
+                    peer != &announce_url && peer != &local_url && peer != &local_ip_url
+                });
                 if !current_peers.is_empty() {
                     broadcast_block(&mined_block, &current_peers).await;
+                }
+
+                // Best-effort: check whether a peer accepted the mined block
+                if let Some(peer) = current_peers.first() {
+                    let height = mined_block.coinbase.height;
+                    let url = format!("{}/block/height/{}", peer, height);
+                    let result = client.get(&url).send().await;
+                    match result {
+                        Ok(resp) if resp.status().is_success() => {
+                            if let Ok(info) = resp.json::<serde_json::Value>().await {
+                                let peer_hash = info.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+                                if peer_hash == mined_block.hash_hex() {
+                                    tracing::info!("Peer accepted block at height {}.", height);
+                                } else {
+                                    tracing::info!("Peer has different block at height {}.", height);
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::warn!("Could not confirm peer acceptance for height {}.", height);
+                        }
+                    }
                 }
             }
         });
