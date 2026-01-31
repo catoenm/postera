@@ -256,6 +256,9 @@ enum Commands {
         /// SIMD mode (optional). Currently supports: neon
         #[arg(short, long, value_enum)]
         simd: Option<SimdArg>,
+        /// Public URL to announce to peers (e.g. https://example.com)
+        #[arg(long)]
+        public_url: Option<String>,
         /// Disable connecting to seed nodes
         #[arg(long)]
         no_seeds: bool,
@@ -321,6 +324,7 @@ async fn main() -> anyhow::Result<()> {
             mine,
             jobs,
             simd,
+            public_url,
             no_seeds,
         } => {
             // Use config defaults, with CLI/env overrides
@@ -335,7 +339,16 @@ async fn main() -> anyhow::Result<()> {
             };
             peers.extend(peer);
 
-            cmd_node(port, peers, &data_dir, mine, jobs, simd.map(Into::into)).await?;
+            cmd_node(
+                port,
+                peers,
+                &data_dir,
+                mine,
+                jobs,
+                simd.map(Into::into),
+                public_url,
+            )
+            .await?;
         }
     }
 
@@ -469,6 +482,7 @@ async fn cmd_node(
     mine_wallet: Option<String>,
     jobs: usize,
     simd: Option<SimdMode>,
+    public_url: Option<String>,
 ) -> anyhow::Result<()> {
     use postera::network::{AppState, MinerStats, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
     use postera::crypto::proof::CircomVerifyingParams;
@@ -539,7 +553,8 @@ async fn cmd_node(
     let app = create_router(state.clone());
 
     // Build our own URL for peer announcements
-    let our_url = format!("http://localhost:{}", port);
+    let our_url = public_url.unwrap_or_else(|| format!("http://localhost:{}", port));
+    println!("Announcing as:  {}", our_url);
 
     // Sync from peers on startup
     if !peers.is_empty() {
