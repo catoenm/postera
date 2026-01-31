@@ -557,8 +557,10 @@ async fn add_peer(
 ) -> Json<AddPeerResponse> {
     let mut peers = state.peers.write().unwrap();
 
+    let is_localhost = req.url.contains("://localhost") || req.url.contains("://127.0.0.1");
+
     // Avoid duplicates
-    if !peers.contains(&req.url) {
+    if !is_localhost && !peers.contains(&req.url) {
         peers.push(req.url.clone());
         info!("Added peer: {}", req.url);
     }
