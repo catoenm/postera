@@ -19,7 +19,7 @@ use tower_governor::{
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
-use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction};
+use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction, ShieldedTransactionV2, Transaction};
 use crate::crypto::nullifier::Nullifier;
 use tracing::{info, warn};
 
@@ -80,6 +80,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/block/:hash", get(get_block))
         .route("/block/height/:height", get(get_block_by_height))
         .route("/tx", post(submit_transaction))
+        .route("/tx/v2", post(submit_transaction_v2))
         .route("/tx/:hash", get(get_transaction))
         .route("/transactions/recent", get(get_recent_transactions))
         .route("/mempool", get(get_mempool))
@@ -387,6 +388,61 @@ async fn submit_transaction(
     }))
 }
 
+/// V2 transaction submission request (post-quantum).
+#[derive(Deserialize)]
+struct SubmitTxV2Request {
+    transaction: ShieldedTransactionV2,
+}
+
+/// Submit a V2 (post-quantum) shielded transaction.
+async fn submit_transaction_v2(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SubmitTxV2Request>,
+) -> Result<Json<SubmitTxResponse>, (StatusCode, String)> {
+    let tx = req.transaction;
+    let hash = hex::encode(tx.hash());
+
+    info!("Received V2 transaction: {}", &hash[..16]);
+
+    // Wrap in Transaction enum for validation and mempool
+    let wrapped_tx = Transaction::V2(tx.clone());
+
+    // Validate V2 transaction
+    {
+        let chain = state.blockchain.read().unwrap();
+        chain
+            .state()
+            .validate_transaction_v2(&tx)
+            .map_err(|e| {
+                warn!("V2 transaction validation failed: {}", e);
+                (StatusCode::BAD_REQUEST, e.to_string())
+            })?;
+    }
+
+    // Add to mempool
+    let added = {
+        let mut mempool = state.mempool.write().unwrap();
+        mempool.add_v2(wrapped_tx.clone())
+    };
+
+    if !added {
+        return Err((
+            StatusCode::CONFLICT,
+            "Transaction already in mempool or conflicts with pending".to_string(),
+        ));
+    }
+
+    info!("V2 transaction {} added to mempool", &hash[..16]);
+
+    // TODO: Relay V2 transactions to peers
+    // For now, V2 transactions stay in local mempool
+
+    Ok(Json(SubmitTxResponse {
+        hash,
+        status: "pending".to_string(),
+    }))
+}
+
 #[derive(Serialize)]
 struct MempoolResponse {
     count: usize,
@@ -446,7 +502,7 @@ async fn receive_block(
                 mempool.remove_confirmed(&tx_hashes);
 
                 // Remove transactions with now-spent nullifiers
-                let nullifiers: Vec<_> = block.nullifiers();
+                let nullifiers: Vec<[u8; 32]> = block.nullifiers().iter().map(|n| n.0).collect();
                 mempool.remove_spent_nullifiers(&nullifiers);
 
                 // Re-validate remaining mempool transactions

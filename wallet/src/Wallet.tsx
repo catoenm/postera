@@ -11,10 +11,10 @@ import {
 import { computePkHash } from './shielded-crypto';
 import { ShieldedWallet } from './shielded-wallet';
 import {
-  createShieldedTransaction,
+  createShieldedTransactionV2,
   validateTransactionParams,
 } from './transaction-builder';
-import { submitShieldedTransaction } from './api';
+import { submitShieldedTransactionV2 } from './api';
 import type { Wallet as WalletType } from './types';
 import './App.css';
 
@@ -217,13 +217,12 @@ export default function Wallet() {
     setSendResult(null);
 
     try {
-      // Ensure proving keys are loaded (required for ZK proof generation)
-      if (!ShieldedWallet.isProverReady) {
-        setSendResult({ success: false, message: 'Loading ZK proving keys...' });
-        await ShieldedWallet.initialize(true, (msg) => {
-          setSendResult({ success: false, message: msg });
-        });
-      }
+      // Initialize V2 (Plonky2) prover for quantum-resistant proofs
+      setSendResult({ success: false, message: 'Initializing quantum-resistant prover...' });
+      const { initProver, prebuildCircuit } = await import('./prover-pq');
+      await initProver();
+      // Pre-build circuit for 1 spend, 1 output (common case)
+      await prebuildCircuit(1, 1);
 
       // Parse amounts
       const amount = ShieldedWallet.parseAmount(sendAmount);
@@ -252,9 +251,9 @@ export default function Wallet() {
         throw new Error(validationError);
       }
 
-      // Build transaction with progress updates
-      setSendResult({ success: false, message: `Preparing transaction with ${notesToSpend.length} note(s)...` });
-      const tx = await createShieldedTransaction({
+      // Build V2 (post-quantum) transaction with progress updates
+      setSendResult({ success: false, message: `Preparing V2 (quantum-resistant) transaction with ${notesToSpend.length} note(s)...` });
+      const tx = await createShieldedTransactionV2({
         spendNotes: notesToSpend,
         recipients: [{ pkHash: recipientPkHash, amount }],
         fee,
@@ -266,9 +265,9 @@ export default function Wallet() {
         },
       });
 
-      // Submit
-      setSendResult({ success: false, message: 'Submitting transaction to network...' });
-      const result = await submitShieldedTransaction(tx);
+      // Submit V2 transaction
+      setSendResult({ success: false, message: 'Submitting V2 transaction to network...' });
+      const result = await submitShieldedTransactionV2(tx);
 
       if ('error' in result) {
         throw new Error(result.error);

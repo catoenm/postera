@@ -7,19 +7,37 @@ export default defineConfig({
     react(),
     nodePolyfills({
       include: ['buffer', 'process'],
+      // Disable global injection - we'll handle it via define
       globals: {
         Buffer: true,
-        global: true,
+        global: false,  // Disable - handled via define
         process: true,
       },
+      // Use protocolImports: false to avoid resolution issues with WASM
+      protocolImports: false,
     }),
   ],
+  // Define global as globalThis for browser compatibility
+  define: {
+    global: 'globalThis',
+  },
   base: '/',
   build: {
     outDir: '../static',
     emptyOutDir: true,
     // Increase chunk size warning limit for large ZK proving keys
     chunkSizeWarningLimit: 5000,
+    rollupOptions: {
+      // Handle the WASM module's global reference
+      onwarn(warning, warn) {
+        // Ignore warnings about module externalization
+        if (warning.code === 'MODULE_LEVEL_DIRECTIVE' ||
+            (warning.message && warning.message.includes('externalized'))) {
+          return;
+        }
+        warn(warning);
+      },
+    },
   },
   server: {
     proxy: {
@@ -42,4 +60,7 @@ export default defineConfig({
   },
   // Configure WASM handling
   assetsInclude: ['**/*.wasm', '**/*.zkey'],
+  optimizeDeps: {
+    exclude: ['postera-plonky2-wasm'],
+  },
 })

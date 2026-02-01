@@ -107,10 +107,39 @@ export async function getWitnessByPosition(position: number | bigint): Promise<W
 }
 
 /**
- * Submit a shielded transaction.
+ * Submit a V1 shielded transaction.
  */
 export async function submitShieldedTransaction(tx: unknown): Promise<{ hash: string; status: string } | { error: string }> {
   const res = await fetch(`${API_BASE}/tx`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transaction: tx }),
+  });
+
+  // Handle both JSON and plain text responses
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // Response was plain text
+    if (!res.ok) {
+      return { error: text };
+    }
+    return { error: `Unexpected response: ${text}` };
+  }
+
+  if (!res.ok) {
+    return { error: typeof data === 'string' ? data : JSON.stringify(data) };
+  }
+  return data as { hash: string; status: string };
+}
+
+/**
+ * Submit a V2 (post-quantum) shielded transaction.
+ */
+export async function submitShieldedTransactionV2(tx: unknown): Promise<{ hash: string; status: string } | { error: string }> {
+  const res = await fetch(`${API_BASE}/tx/v2`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ transaction: tx }),

@@ -14,7 +14,7 @@ sha2 = { version = "0.10", features = ["asm", "compress"] }
 blake2 = "0.10"
 light-poseidon = "0.2"
 
-# zk-SNARKs (Groth16 on BN254 for compatibility with circomlibjs/snarkjs)
+# zk-SNARKs (Groth16 on BN254 for compatibility with circomlibjs/snarkjs) - V1 LEGACY
 ark-groth16 = "0.4"
 ark-bls12-381 = "0.4"
 ark-bn254 = "0.4"
@@ -26,6 +26,12 @@ ark-relations = "0.4"
 ark-r1cs-std = "0.4"
 ark-snark = "0.4"
 ark-crypto-primitives = { version = "0.4", features = ["commitment", "merkle_tree", "prf", "sponge", "r1cs"] }
+
+# Post-quantum ZK proofs (Plonky2 STARKs) - V2 QUANTUM-SAFE
+# Plonky2 provides FRI-based proofs using only hash assumptions (quantum-resistant)
+# Supports browser WASM compilation for client-side proving
+plonky2 = "1.0"
+plonky2_field = "1.0"
 
 # Encryption (for note encryption)
 chacha20poly1305 = "0.10"

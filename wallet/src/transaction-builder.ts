@@ -10,6 +10,7 @@ import {
   encryptNote,
   generateRandomness,
   deriveViewingKey,
+  deriveNullifierKey,
 } from './shielded-crypto';
 import { sign, hexToBytes, bytesToHex } from './crypto';
 import { getWitnessByPosition } from './api';
@@ -120,9 +121,12 @@ function positionToPathIndices(position: bigint, depth: number): number[] {
 export async function createShieldedTransaction(
   params: TransactionParams
 ): Promise<ShieldedTransaction> {
+  console.log('=== V1 TRANSACTION (Groth16/Circom) ===');
+  console.warn('WARNING: V1 path should not be called - quantum vulnerable!');
   const { spendNotes, recipients, fee, secretKey, publicKey, senderPkHash, onProgress } = params;
 
   const progress = (msg: string) => {
+    console.log('[V1]', msg);
     if (onProgress) onProgress(msg);
   };
 
@@ -449,3 +453,280 @@ export function formatTransactionSummary(
 
 // Re-export prover functions for convenient access
 export { loadProvingKeys, areProvingKeysLoaded, setCircuitBasePath } from './prover';
+
+// ============================================================================
+// V2 Transaction Support (Post-Quantum)
+// ============================================================================
+
+import {
+  generateTransactionProofPQ,
+  type SpendWitnessPQ,
+  type OutputWitnessPQ,
+} from './prover-pq';
+import {
+  commitToNotePQ,
+  generateRandomnessPQ,
+} from './commitment-pq';
+
+/**
+ * V2 spend description (post-quantum).
+ * No value commitment or individual proof - balance proven in combined proof.
+ */
+export interface SpendDescriptionV2 {
+  anchor: string;           // hex string
+  nullifier: string;        // hex string (32 bytes)
+  signature: string;        // hex string (ML-DSA-65)
+  public_key: string;       // hex string (ML-DSA-65)
+}
+
+/**
+ * V2 output description (post-quantum).
+ * No value commitment or individual proof.
+ */
+export interface OutputDescriptionV2 {
+  note_commitment: string;  // hex string (32 bytes, Poseidon/Goldilocks)
+  encrypted_note: {
+    ciphertext: number[];   // byte array
+    ephemeral_pk: number[]; // byte array
+  };
+}
+
+/**
+ * V2 shielded transaction (post-quantum).
+ */
+export interface ShieldedTransactionV2 {
+  version: 2;
+  spends: SpendDescriptionV2[];
+  outputs: OutputDescriptionV2[];
+  fee: number;
+  transaction_proof: {
+    proof_bytes: string;         // hex - Plonky2 STARK proof
+    public_inputs: {
+      merkle_roots: number[][];    // array of 32-byte arrays
+      nullifiers: number[][];      // array of 32-byte arrays
+      note_commitments: number[][]; // array of 32-byte arrays
+      fee: number;
+    };
+  };
+}
+
+/**
+ * Transaction creation options.
+ */
+export interface TransactionOptions {
+  /** Transaction version: 1 (legacy) or 2 (post-quantum) */
+  version?: 1 | 2;
+}
+
+/**
+ * Create a shielded transaction (supports both V1 and V2).
+ *
+ * @param params - Transaction parameters
+ * @param options - Transaction options (version selection)
+ * @returns V1 or V2 transaction based on version option
+ */
+export async function createShieldedTransactionVersioned(
+  params: TransactionParams,
+  options: TransactionOptions = { version: 2 }
+): Promise<ShieldedTransaction | ShieldedTransactionV2> {
+  if (options.version === 2) {
+    return createShieldedTransactionV2(params);
+  }
+  return createShieldedTransaction(params);
+}
+
+/**
+ * Create a V2 (post-quantum) shielded transaction.
+ *
+ * This uses:
+ * - Hash-based commitments (Poseidon/Goldilocks)
+ * - Combined STARK proof (RISC Zero)
+ * - ML-DSA-65 signatures (already quantum-safe)
+ *
+ * No binding signature needed - balance is proven in the STARK.
+ */
+export async function createShieldedTransactionV2(
+  params: TransactionParams
+): Promise<ShieldedTransactionV2> {
+  console.log('=== V2 TRANSACTION (Plonky2/STARK) ===');
+  const { spendNotes, recipients, fee, secretKey, publicKey, senderPkHash, onProgress } = params;
+
+  const progress = (msg: string) => {
+    console.log('[V2]', msg);
+    if (onProgress) onProgress(msg);
+  };
+
+  // Calculate totals
+  const totalSpend = spendNotes.reduce((sum, n) => sum + n.value, 0n);
+  const totalOutput = recipients.reduce((sum, r) => sum + r.amount, 0n);
+  const change = totalSpend - totalOutput - fee;
+
+  if (change < 0n) {
+    throw new Error(
+      `Insufficient funds: spending ${totalSpend}, outputs ${totalOutput}, fee ${fee}`
+    );
+  }
+
+  // Build output list
+  const outputParams: { pkHash: string; amount: bigint }[] = [...recipients];
+  if (change > 0n) {
+    outputParams.push({
+      pkHash: bytesToHex(senderPkHash),
+      amount: change,
+    });
+  }
+
+  const totalSteps = spendNotes.length + outputParams.length + 1;
+  let currentStep = 0;
+
+  // Build spend witnesses for STARK proof
+  progress('Building spend witnesses...');
+  const spendWitnesses: SpendWitnessPQ[] = [];
+  const spendDescriptions: SpendDescriptionV2[] = [];
+
+  for (let i = 0; i < spendNotes.length; i++) {
+    currentStep++;
+    progress(`Processing spend ${i + 1}/${spendNotes.length} (step ${currentStep}/${totalSteps})...`);
+
+    const note = spendNotes[i];
+
+    // Get Merkle witness from server
+    const witness = await getWitnessByPosition(note.position);
+
+    // Build spend witness for STARK
+    const spendWitness: SpendWitnessPQ = {
+      value: note.value,
+      recipientPkHash: hexToBytes(note.recipientPkHash),
+      randomness: hexToBytes(note.randomness),
+      nullifierKey: deriveNullifierKey(secretKey),
+      position: note.position,
+      merkleRoot: hexToBytes(witness.root),
+      merklePath: witness.path.map((p) => hexToBytes(p)),
+      pathIndices: positionToPathIndices(note.position, 32),
+    };
+    spendWitnesses.push(spendWitness);
+  }
+
+  // Build output witnesses for STARK proof
+  progress('Building output witnesses...');
+  const outputWitnesses: OutputWitnessPQ[] = [];
+  const outputDescriptions: OutputDescriptionV2[] = [];
+  const viewingKey = deriveViewingKey(secretKey);
+
+  for (let i = 0; i < outputParams.length; i++) {
+    currentStep++;
+    const isChange = i === outputParams.length - 1 && change > 0n;
+    const label = isChange ? 'change' : `recipient ${i + 1}`;
+    progress(`Processing output for ${label} (step ${currentStep}/${totalSteps})...`);
+
+    const { pkHash, amount } = outputParams[i];
+    const pkHashBytes = hexToBytes(pkHash);
+    const randomness = generateRandomnessPQ();
+
+    // Build output witness for STARK
+    outputWitnesses.push({
+      value: amount,
+      recipientPkHash: pkHashBytes,
+      randomness,
+    });
+
+    // Compute PQ commitment
+    const commitment = commitToNotePQ(amount, pkHashBytes, randomness);
+
+    // Encrypt note
+    const encrypted = encryptNote(amount, pkHashBytes, randomness, viewingKey);
+
+    outputDescriptions.push({
+      note_commitment: bytesToHex(commitment),
+      encrypted_note: {
+        ciphertext: Array.from(encrypted.ciphertext),
+        ephemeral_pk: Array.from(encrypted.ephemeralPk),
+      },
+    });
+  }
+
+  // Generate combined STARK proof
+  currentStep++;
+  progress(`Generating STARK proof (step ${currentStep}/${totalSteps})...`);
+
+  const proof = await generateTransactionProofPQ(
+    spendWitnesses,
+    outputWitnesses,
+    fee
+  );
+
+  // Sign spends with ML-DSA-65
+  progress('Signing spends...');
+
+  for (let i = 0; i < spendNotes.length; i++) {
+    // Create signing message: anchor + nullifier + fee
+    // This binds the signature to the specific spend in this transaction
+    const feeBytes = new Uint8Array(8);
+    new DataView(feeBytes.buffer).setBigUint64(0, fee, true);
+
+    const message = new Uint8Array([
+      ...proof.publicInputs.merkleRoots[i],
+      ...proof.publicInputs.nullifiers[i],
+      ...feeBytes,
+    ]);
+    const signature = sign(message, secretKey);
+
+    spendDescriptions.push({
+      anchor: bytesToHex(proof.publicInputs.merkleRoots[i]),
+      nullifier: bytesToHex(proof.publicInputs.nullifiers[i]),
+      signature: bytesToHex(signature),
+      public_key: bytesToHex(publicKey),
+    });
+  }
+
+  progress('V2 transaction complete.');
+
+  return {
+    version: 2,
+    spends: spendDescriptions,
+    outputs: outputDescriptions,
+    fee: Number(fee),
+    transaction_proof: {
+      proof_bytes: bytesToHex(proof.proofBytes),
+      public_inputs: {
+        merkle_roots: proof.publicInputs.merkleRoots.map(r => Array.from(r)),
+        nullifiers: proof.publicInputs.nullifiers.map(n => Array.from(n)),
+        note_commitments: proof.publicInputs.noteCommitments.map(c => Array.from(c)),
+        fee: Number(fee),
+      },
+    },
+  };
+}
+
+/**
+ * Estimate fee for a V2 transaction.
+ * V2 transactions have different size characteristics than V1.
+ */
+export function estimateFeeV2(numSpends: number, numOutputs: number): bigint {
+  // V2 fees are generally lower per-spend due to combined proof
+  const baseFee = 1_500_000n;
+  const perSpend = 300_000n;  // Lower than V1
+  const perOutput = 300_000n; // Lower than V1
+  const proofFee = 500_000n;  // Fixed cost for STARK proof
+  return baseFee + BigInt(numSpends) * perSpend + BigInt(numOutputs) * perOutput + proofFee;
+}
+
+/**
+ * Validate V2 transaction parameters.
+ */
+export function validateTransactionParamsV2(params: TransactionParams): string | null {
+  // Same validation as V1
+  return validateTransactionParams(params);
+}
+
+/**
+ * Format V2 transaction summary.
+ */
+export function formatTransactionSummaryV2(
+  spendNotes: WalletNote[],
+  recipients: { pkHash: string; amount: bigint }[],
+  fee: bigint
+): string {
+  const summary = formatTransactionSummary(spendNotes, recipients, fee);
+  return `[V2/Post-Quantum]\n${summary}`;
+}

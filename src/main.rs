@@ -703,7 +703,7 @@ async fn cmd_node(
                             mempool.remove_confirmed(&tx_hashes);
 
                             // Remove transactions with spent nullifiers
-                            let nullifiers: Vec<_> = mined_block.nullifiers();
+                            let nullifiers: Vec<[u8; 32]> = mined_block.nullifiers().iter().map(|n| n.0).collect();
                             mempool.remove_spent_nullifiers(&nullifiers);
 
                             // Re-validate remaining mempool transactions
