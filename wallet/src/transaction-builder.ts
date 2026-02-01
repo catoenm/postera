@@ -121,9 +121,12 @@ function positionToPathIndices(position: bigint, depth: number): number[] {
 export async function createShieldedTransaction(
   params: TransactionParams
 ): Promise<ShieldedTransaction> {
+  console.log('=== V1 TRANSACTION (Groth16/Circom) ===');
+  console.warn('WARNING: V1 path should not be called - quantum vulnerable!');
   const { spendNotes, recipients, fee, secretKey, publicKey, senderPkHash, onProgress } = params;
 
   const progress = (msg: string) => {
+    console.log('[V1]', msg);
     if (onProgress) onProgress(msg);
   };
 
@@ -459,13 +462,11 @@ import {
   generateTransactionProofPQ,
   type SpendWitnessPQ,
   type OutputWitnessPQ,
-  type RiscZeroReceipt,
 } from './prover-pq';
 import {
   commitToNotePQ,
   generateRandomnessPQ,
 } from './commitment-pq';
-import { bytesToGoldilocks, goldilocksToBytes } from './poseidon-pq';
 
 /**
  * V2 spend description (post-quantum).
@@ -473,7 +474,7 @@ import { bytesToGoldilocks, goldilocksToBytes } from './poseidon-pq';
  */
 export interface SpendDescriptionV2 {
   anchor: string;           // hex string
-  nullifier: Uint8Array;    // 32 bytes
+  nullifier: string;        // hex string (32 bytes)
   signature: string;        // hex string (ML-DSA-65)
   public_key: string;       // hex string (ML-DSA-65)
 }
@@ -483,10 +484,10 @@ export interface SpendDescriptionV2 {
  * No value commitment or individual proof.
  */
 export interface OutputDescriptionV2 {
-  note_commitment: Uint8Array;  // 32 bytes (Poseidon/Goldilocks)
+  note_commitment: string;  // hex string (32 bytes, Poseidon/Goldilocks)
   encrypted_note: {
-    ciphertext: Uint8Array;
-    ephemeral_pk: Uint8Array;
+    ciphertext: number[];   // byte array
+    ephemeral_pk: number[]; // byte array
   };
 }
 
@@ -499,8 +500,13 @@ export interface ShieldedTransactionV2 {
   outputs: OutputDescriptionV2[];
   fee: number;
   transaction_proof: {
-    receipt_bytes: string;  // hex
-    image_id: string;       // hex
+    proof_bytes: string;         // hex - Plonky2 STARK proof
+    public_inputs: {
+      merkle_roots: number[][];    // array of 32-byte arrays
+      nullifiers: number[][];      // array of 32-byte arrays
+      note_commitments: number[][]; // array of 32-byte arrays
+      fee: number;
+    };
   };
 }
 
@@ -542,9 +548,11 @@ export async function createShieldedTransactionVersioned(
 export async function createShieldedTransactionV2(
   params: TransactionParams
 ): Promise<ShieldedTransactionV2> {
+  console.log('=== V2 TRANSACTION (Plonky2/STARK) ===');
   const { spendNotes, recipients, fee, secretKey, publicKey, senderPkHash, onProgress } = params;
 
   const progress = (msg: string) => {
+    console.log('[V2]', msg);
     if (onProgress) onProgress(msg);
   };
 
@@ -629,10 +637,10 @@ export async function createShieldedTransactionV2(
     const encrypted = encryptNote(amount, pkHashBytes, randomness, viewingKey);
 
     outputDescriptions.push({
-      note_commitment: commitment,
+      note_commitment: bytesToHex(commitment),
       encrypted_note: {
-        ciphertext: encrypted.ciphertext,
-        ephemeral_pk: encrypted.ephemeralPk,
+        ciphertext: Array.from(encrypted.ciphertext),
+        ephemeral_pk: Array.from(encrypted.ephemeralPk),
       },
     });
   }
@@ -641,7 +649,7 @@ export async function createShieldedTransactionV2(
   currentStep++;
   progress(`Generating STARK proof (step ${currentStep}/${totalSteps})...`);
 
-  const receipt = await generateTransactionProofPQ(
+  const proof = await generateTransactionProofPQ(
     spendWitnesses,
     outputWitnesses,
     fee
@@ -651,12 +659,21 @@ export async function createShieldedTransactionV2(
   progress('Signing spends...');
 
   for (let i = 0; i < spendNotes.length; i++) {
-    const message = receipt.journal.spendMessages[i];
+    // Create signing message: anchor + nullifier + fee
+    // This binds the signature to the specific spend in this transaction
+    const feeBytes = new Uint8Array(8);
+    new DataView(feeBytes.buffer).setBigUint64(0, fee, true);
+
+    const message = new Uint8Array([
+      ...proof.publicInputs.merkleRoots[i],
+      ...proof.publicInputs.nullifiers[i],
+      ...feeBytes,
+    ]);
     const signature = sign(message, secretKey);
 
     spendDescriptions.push({
-      anchor: bytesToHex(spendWitnesses[i].merkleRoot),
-      nullifier: receipt.journal.nullifiers[i],
+      anchor: bytesToHex(proof.publicInputs.merkleRoots[i]),
+      nullifier: bytesToHex(proof.publicInputs.nullifiers[i]),
       signature: bytesToHex(signature),
       public_key: bytesToHex(publicKey),
     });
@@ -670,8 +687,13 @@ export async function createShieldedTransactionV2(
     outputs: outputDescriptions,
     fee: Number(fee),
     transaction_proof: {
-      receipt_bytes: bytesToHex(receipt.receiptBytes),
-      image_id: bytesToHex(receipt.imageId),
+      proof_bytes: bytesToHex(proof.proofBytes),
+      public_inputs: {
+        merkle_roots: proof.publicInputs.merkleRoots.map(r => Array.from(r)),
+        nullifiers: proof.publicInputs.nullifiers.map(n => Array.from(n)),
+        note_commitments: proof.publicInputs.noteCommitments.map(c => Array.from(c)),
+        fee: Number(fee),
+      },
     },
   };
 }

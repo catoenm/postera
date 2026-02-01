@@ -752,6 +752,24 @@ impl Transaction {
     pub fn is_migration(&self) -> bool {
         matches!(self, Transaction::Migration(_))
     }
+
+    /// Get all nullifiers as raw bytes.
+    pub fn nullifiers(&self) -> Vec<[u8; 32]> {
+        match self {
+            Transaction::V1(tx) => tx.nullifiers().iter().map(|n| n.0).collect(),
+            Transaction::V2(tx) => tx.nullifiers(),
+            Transaction::Migration(tx) => tx.legacy_nullifiers().iter().map(|n| n.0).collect(),
+        }
+    }
+
+    /// Get all anchors (merkle roots).
+    pub fn anchors(&self) -> Vec<[u8; 32]> {
+        match self {
+            Transaction::V1(tx) => tx.anchors().iter().map(|a| **a).collect(),
+            Transaction::V2(tx) => tx.spends.iter().map(|s| s.anchor).collect(),
+            Transaction::Migration(tx) => tx.legacy_spends.iter().map(|s| s.anchor).collect(),
+        }
+    }
 }
 
 #[cfg(test)]

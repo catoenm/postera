@@ -610,16 +610,18 @@ fn set_spend_witness(
         pw.set_bool_target(targets.path_indices[i], idx != 0).map_err(map_err)?;
     }
 
-    // Merkle root (public)
-    let root_bytes = hex_to_bytes32(&witness.merkle_root)?;
-    let root_fields = bytes_to_field_elements(&root_bytes);
+    // Compute note commitment (needed for merkle root and nullifier)
+    let note_commitment = native_note_commitment(value, &pk_hash_bytes, &randomness_bytes);
+
+    // Compute Merkle root from path (public) - MUST match circuit computation
+    let merkle_root = native_merkle_root(&note_commitment, &witness.merkle_path, &witness.path_indices)?;
+    let root_fields = bytes_to_field_elements(&merkle_root);
     for (i, &val) in root_fields.iter().enumerate() {
         pw.set_target(targets.merkle_root[i], val).map_err(map_err)?;
     }
 
-    // Compute and set nullifier (public)
-    // We need to compute it from the witness data
-    let nullifier = compute_nullifier_from_witness(witness)?;
+    // Compute nullifier from note commitment (public)
+    let nullifier = native_nullifier(&nk_bytes, &note_commitment, position);
     let nf_fields = bytes_to_field_elements(&nullifier);
     for (i, &val) in nf_fields.iter().enumerate() {
         pw.set_target(targets.nullifier[i], val).map_err(map_err)?;
@@ -805,6 +807,33 @@ fn native_nullifier(nk: &[u8; 32], commitment: &[u8; 32], position: u64) -> [u8;
 
     let hash = native_poseidon(&inputs);
     field_elements_to_bytes(&hash)
+}
+
+/// Compute Merkle root by traversing path from leaf to root.
+fn native_merkle_root(leaf: &[u8; 32], path: &[String], indices: &[u8]) -> Result<[u8; 32], JsError> {
+    let domain = F::from_canonical_u64(DOMAIN_MERKLE_NODE);
+    let mut current = bytes_to_field_elements(leaf);
+
+    for (sibling_hex, &is_right) in path.iter().zip(indices.iter()) {
+        let sibling_bytes = hex_to_bytes32(sibling_hex)?;
+        let sibling_fields = bytes_to_field_elements(&sibling_bytes);
+
+        // Determine left/right based on is_right flag
+        let (left, right) = if is_right != 0 {
+            (sibling_fields, current)
+        } else {
+            (current, sibling_fields)
+        };
+
+        let mut inputs = vec![domain];
+        inputs.extend_from_slice(&left);
+        inputs.extend_from_slice(&right);
+
+        let hash = native_poseidon(&inputs);
+        current = hash;
+    }
+
+    Ok(field_elements_to_bytes(&current))
 }
 
 #[cfg(test)]

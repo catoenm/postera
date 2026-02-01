@@ -1,7 +1,8 @@
 //! Shielded state model for private transactions.
 //!
 //! Instead of account balances, we track:
-//! - CommitmentTree: All note commitments ever created
+//! - CommitmentTree: All note commitments ever created (V1, BN254-based)
+//! - CommitmentTreePQ: V2 commitment tree (Goldilocks-based, quantum-resistant)
 //! - NullifierSet: All nullifiers (spent notes)
 //!
 //! This enables full transaction privacy - no balances are visible on-chain.
@@ -14,6 +15,10 @@ use crate::crypto::{
     proof::{
         bytes_to_public_inputs, output_bytes_to_public_inputs, verify_output_proof,
         verify_spend_proof, CircomVerifyingParams,
+    },
+    pq::{
+        commitment_pq::NoteCommitmentPQ,
+        merkle_pq::{CommitmentTreePQ, TreeHashPQ, MerkleWitnessPQ},
     },
 };
 
@@ -28,8 +33,10 @@ use super::transaction::{
 /// are stored - only cryptographic commitments and nullifiers.
 #[derive(Clone, Debug, Default)]
 pub struct ShieldedState {
-    /// Tree of all note commitments ever created.
+    /// V1 tree of all note commitments (Poseidon/BN254).
     commitment_tree: CommitmentTree,
+    /// V2 tree of all note commitments (Poseidon/Goldilocks, quantum-resistant).
+    commitment_tree_pq: CommitmentTreePQ,
     /// Set of all spent nullifiers.
     nullifier_set: HashSet<Nullifier>,
 }
@@ -39,13 +46,19 @@ impl ShieldedState {
     pub fn new() -> Self {
         Self {
             commitment_tree: CommitmentTree::new(),
+            commitment_tree_pq: CommitmentTreePQ::new(),
             nullifier_set: HashSet::new(),
         }
     }
 
-    /// Get the current commitment tree root.
+    /// Get the current commitment tree root (V1).
     pub fn commitment_root(&self) -> TreeHash {
         self.commitment_tree.root()
+    }
+
+    /// Get the current V2 commitment tree root.
+    pub fn commitment_root_pq(&self) -> TreeHashPQ {
+        self.commitment_tree_pq.root()
     }
 
     /// Get the number of commitments in the tree.
@@ -63,14 +76,29 @@ impl ShieldedState {
         self.nullifier_set.contains(nullifier)
     }
 
-    /// Check if a root is a valid recent root.
+    /// Check if a root is a valid recent root (V1).
     pub fn is_valid_anchor(&self, anchor: &TreeHash) -> bool {
         self.commitment_tree.is_valid_root(anchor)
     }
 
-    /// Get the commitment tree (for witness generation).
+    /// Check if a root is a valid recent root (V2/PQ).
+    pub fn is_valid_anchor_pq(&self, anchor: &TreeHashPQ) -> bool {
+        self.commitment_tree_pq.is_valid_root(anchor)
+    }
+
+    /// Get the V1 commitment tree (for witness generation).
     pub fn commitment_tree(&self) -> &CommitmentTree {
         &self.commitment_tree
+    }
+
+    /// Get the V2 commitment tree (for witness generation).
+    pub fn commitment_tree_pq(&self) -> &CommitmentTreePQ {
+        &self.commitment_tree_pq
+    }
+
+    /// Get a V2 Merkle witness for a commitment at the given position.
+    pub fn witness_pq(&self, position: u64) -> Option<MerkleWitnessPQ> {
+        self.commitment_tree_pq.witness(position)
     }
 
     /// Get the nullifier set.

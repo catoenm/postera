@@ -417,7 +417,7 @@ export function createShieldedWallet(secretKeyHex: string, publicKeyHex: string)
 // V2 (Post-Quantum) Note Support
 // ============================================================================
 
-import { isV1Note, isV2Note, type V2Note, getMigrationStats } from './migration';
+import { type V2Note, getMigrationStats } from './migration';
 
 /**
  * Extended wallet note type supporting both V1 and V2.

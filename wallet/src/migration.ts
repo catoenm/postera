@@ -18,23 +18,17 @@
  */
 
 import type { WalletNote } from './types';
-import { hexToBytes, bytesToHex, sign } from './crypto';
+import { hexToBytes, bytesToHex } from './crypto';
 import {
   commitToNotePQ,
   generateRandomnessPQ,
   deriveNullifierPQ,
 } from './commitment-pq';
-import { goldilocksToBytes, bytesToGoldilocks } from './poseidon-pq';
 import {
   generateTransactionProofPQ,
-  type SpendWitnessPQ,
   type OutputWitnessPQ,
-  type RiscZeroReceipt,
+  type Plonky2Proof,
 } from './prover-pq';
-import {
-  createShieldedTransaction,
-  type TransactionParams,
-} from './transaction-builder';
 import {
   encryptNote,
   deriveViewingKey,
@@ -88,7 +82,7 @@ export interface MigrationTransaction {
 
   fee: number;
   legacy_binding_sig: { signature: string };
-  migration_proof: RiscZeroReceipt;
+  migration_proof: Plonky2Proof;
 }
 
 /**
@@ -151,25 +145,7 @@ export async function migrateNotesToPQ(
 
   progress(`Migrating ${v1Notes.length} V1 note(s) with total value ${totalValue}`);
 
-  // Step 1: Create V1 spend transaction (to get legacy proofs and binding sig)
-  progress('Creating V1 spend proofs...');
-
-  // We need to spend V1 notes to ourselves (migration)
-  const v1TxParams: TransactionParams = {
-    spendNotes: v1Notes,
-    recipients: [{ pkHash: bytesToHex(senderPkHash), amount: outputValue }],
-    fee,
-    secretKey,
-    publicKey,
-    senderPkHash,
-    onProgress: (msg) => progress(`V1: ${msg}`),
-  };
-
-  // This would normally create a full V1 transaction, but for migration
-  // we only need the spend proofs, not the outputs
-  // For now, we'll create a simplified version
-
-  // Step 2: Create V2 output commitments
+  // Step 1: Create V2 output commitments
   progress('Creating V2 output commitments...');
 
   const v2Notes: V2Note[] = [];
@@ -225,9 +201,6 @@ export async function migrateNotesToPQ(
   // (V1 spend validity is proven by the legacy proofs)
   // The proof verifies that output commitments are correctly formed
 
-  // Create dummy spend witnesses (migration proof doesn't verify spends)
-  const spendWitnesses: SpendWitnessPQ[] = [];
-
   // Generate the STARK proof for outputs
   // Note: In a real migration, this would be a specialized proof
   // that only verifies output validity, not spend validity
@@ -278,7 +251,7 @@ async function generateMigrationProofPQ(
   outputWitnesses: OutputWitnessPQ[],
   totalInputs: bigint,
   fee: bigint
-): Promise<RiscZeroReceipt> {
+): Promise<Plonky2Proof> {
   // Use the regular transaction proof generator with empty spends
   // The proof verifies output validity and balance
   return generateTransactionProofPQ(
@@ -297,7 +270,7 @@ async function generateMigrationProofPQ(
       );
     }
 
-    // Create journal with output commitments only
+    // Create public inputs with output commitments only
     const noteCommitments = outputWitnesses.map((o) => {
       const commitment = commitToNotePQ(
         o.value,
@@ -308,14 +281,12 @@ async function generateMigrationProofPQ(
     });
 
     return {
-      receiptBytes: new Uint8Array(0),
-      imageId: new Uint8Array(32),
-      journal: {
+      proofBytes: new Uint8Array(0),
+      publicInputs: {
         merkleRoots: [],
         nullifiers: [],
         noteCommitments,
         fee,
-        spendMessages: [],
       },
     };
   });
