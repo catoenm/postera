@@ -42,4 +42,7 @@ export default defineConfig({
   },
   // Configure WASM handling
   assetsInclude: ['**/*.wasm', '**/*.zkey'],
+  optimizeDeps: {
+    exclude: ['postera-plonky2-wasm'],
+  },
 })

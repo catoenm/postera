@@ -456,6 +456,304 @@ impl LegacyTransaction {
     }
 }
 
+// ============================================================================
+// V2 Transaction Structures (Post-Quantum)
+// ============================================================================
+
+use crate::crypto::pq::{
+    commitment_pq::NoteCommitmentPQ,
+    proof_pq::Plonky2Proof,
+};
+
+/// A V2 spend description (post-quantum secure).
+///
+/// Unlike V1, this has no value_commitment or individual proof.
+/// Balance is verified inside the combined transaction proof.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpendDescriptionV2 {
+    /// Merkle root of the commitment tree at spend time.
+    #[serde(with = "hex_bytes_32")]
+    pub anchor: [u8; 32],
+
+    /// Nullifier marking this note as spent.
+    #[serde(with = "hex_bytes_32")]
+    pub nullifier: [u8; 32],
+
+    /// ML-DSA-65 signature proving ownership.
+    pub signature: Signature,
+
+    /// ML-DSA-65 public key.
+    #[serde(with = "hex_bytes")]
+    pub public_key: Vec<u8>,
+}
+
+impl SpendDescriptionV2 {
+    /// Verify the spend's ownership signature.
+    pub fn verify_signature(&self, message: &[u8]) -> Result<bool, TransactionError> {
+        verify(message, &self.signature, &self.public_key)
+            .map_err(|_| TransactionError::InvalidSignature)
+    }
+
+    /// Get the size of this spend description in bytes.
+    pub fn size(&self) -> usize {
+        32 + 32 + self.signature.as_bytes().len() + self.public_key.len()
+    }
+}
+
+/// A V2 output description (post-quantum secure).
+///
+/// Unlike V1, this has no value_commitment or individual proof.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputDescriptionV2 {
+    /// Commitment to the new note (hash-based, not Pedersen).
+    #[serde(with = "hex_bytes_32")]
+    pub note_commitment: [u8; 32],
+
+    /// Encrypted note data.
+    pub encrypted_note: EncryptedNote,
+}
+
+impl OutputDescriptionV2 {
+    /// Get the commitment as a PQ note commitment.
+    pub fn commitment_pq(&self) -> NoteCommitmentPQ {
+        NoteCommitmentPQ::from_bytes(self.note_commitment)
+    }
+
+    /// Get the size of this output description in bytes.
+    pub fn size(&self) -> usize {
+        32 + self.encrypted_note.size()
+    }
+}
+
+/// A V2 shielded transaction (post-quantum secure).
+///
+/// Key differences from V1:
+/// - No binding signature (balance proven in ZK)
+/// - No value commitments (balance proven in ZK)
+/// - Combined STARK proof instead of individual Groth16 proofs
+/// - ~200KB proof size but 128-bit post-quantum security
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShieldedTransactionV2 {
+    /// Version number (= 2).
+    pub version: u8,
+
+    /// Spend descriptions.
+    pub spends: Vec<SpendDescriptionV2>,
+
+    /// Output descriptions.
+    pub outputs: Vec<OutputDescriptionV2>,
+
+    /// Transaction fee (PUBLIC).
+    pub fee: u64,
+
+    /// Combined STARK proof for the entire transaction.
+    /// Proves:
+    /// - All spends are valid (Merkle paths, nullifier derivation)
+    /// - All outputs are valid (commitment formation)
+    /// - Balance: sum(inputs) = sum(outputs) + fee
+    pub transaction_proof: Plonky2Proof,
+}
+
+impl ShieldedTransactionV2 {
+    /// Create a new V2 transaction.
+    pub fn new(
+        spends: Vec<SpendDescriptionV2>,
+        outputs: Vec<OutputDescriptionV2>,
+        fee: u64,
+        transaction_proof: Plonky2Proof,
+    ) -> Self {
+        Self {
+            version: 2,
+            spends,
+            outputs,
+            fee,
+            transaction_proof,
+        }
+    }
+
+    /// Compute the transaction hash.
+    pub fn hash(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+
+        hasher.update(&[self.version]);
+
+        for spend in &self.spends {
+            hasher.update(&spend.nullifier);
+            hasher.update(&spend.anchor);
+        }
+
+        for output in &self.outputs {
+            hasher.update(&output.note_commitment);
+        }
+
+        hasher.update(&self.fee.to_le_bytes());
+
+        hasher.finalize().into()
+    }
+
+    /// Get the hash as a hex string.
+    pub fn hash_hex(&self) -> String {
+        hex::encode(self.hash())
+    }
+
+    /// Get all nullifiers.
+    pub fn nullifiers(&self) -> Vec<[u8; 32]> {
+        self.spends.iter().map(|s| s.nullifier).collect()
+    }
+
+    /// Get all note commitments.
+    pub fn note_commitments(&self) -> Vec<[u8; 32]> {
+        self.outputs.iter().map(|o| o.note_commitment).collect()
+    }
+
+    /// Get all anchors.
+    pub fn anchors(&self) -> Vec<[u8; 32]> {
+        self.spends.iter().map(|s| s.anchor).collect()
+    }
+
+    /// Get the total size of this transaction in bytes.
+    pub fn size(&self) -> usize {
+        let spend_size: usize = self.spends.iter().map(|s| s.size()).sum();
+        let output_size: usize = self.outputs.iter().map(|o| o.size()).sum();
+        1 + spend_size + output_size + 8 + self.transaction_proof.size()
+    }
+
+    /// Check if this transaction has any spends.
+    pub fn has_spends(&self) -> bool {
+        !self.spends.is_empty()
+    }
+
+    /// Check if this transaction has any outputs.
+    pub fn has_outputs(&self) -> bool {
+        !self.outputs.is_empty()
+    }
+
+    /// Number of spends.
+    pub fn num_spends(&self) -> usize {
+        self.spends.len()
+    }
+
+    /// Number of outputs.
+    pub fn num_outputs(&self) -> usize {
+        self.outputs.len()
+    }
+}
+
+/// A migration transaction for converting V1 notes to V2.
+///
+/// This transaction type allows users to spend V1 notes (using legacy proofs)
+/// and create V2 notes (using PQ commitments).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MigrationTransaction {
+    /// V1 format spends (using legacy Groth16 proofs + binding sig).
+    pub legacy_spends: Vec<SpendDescription>,
+
+    /// V2 format outputs (using PQ commitments).
+    pub pq_outputs: Vec<OutputDescriptionV2>,
+
+    /// Transaction fee.
+    pub fee: u64,
+
+    /// Legacy binding signature (proves V1 spends balance).
+    pub legacy_binding_sig: BindingSignature,
+
+    /// STARK proof that V2 outputs are valid and total matches V1 inputs.
+    pub migration_proof: Plonky2Proof,
+}
+
+impl MigrationTransaction {
+    /// Create a new migration transaction.
+    pub fn new(
+        legacy_spends: Vec<SpendDescription>,
+        pq_outputs: Vec<OutputDescriptionV2>,
+        fee: u64,
+        legacy_binding_sig: BindingSignature,
+        migration_proof: Plonky2Proof,
+    ) -> Self {
+        Self {
+            legacy_spends,
+            pq_outputs,
+            fee,
+            legacy_binding_sig,
+            migration_proof,
+        }
+    }
+
+    /// Compute the transaction hash.
+    pub fn hash(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+
+        // Hash V1 spends
+        for spend in &self.legacy_spends {
+            hasher.update(spend.nullifier.as_ref());
+            hasher.update(&spend.anchor);
+        }
+
+        // Hash V2 outputs
+        for output in &self.pq_outputs {
+            hasher.update(&output.note_commitment);
+        }
+
+        hasher.update(&self.fee.to_le_bytes());
+
+        hasher.finalize().into()
+    }
+
+    /// Get V1 nullifiers.
+    pub fn legacy_nullifiers(&self) -> Vec<&Nullifier> {
+        self.legacy_spends.iter().map(|s| &s.nullifier).collect()
+    }
+
+    /// Get V2 note commitments.
+    pub fn pq_note_commitments(&self) -> Vec<[u8; 32]> {
+        self.pq_outputs.iter().map(|o| o.note_commitment).collect()
+    }
+}
+
+/// Enum for all transaction types (V1, V2, Migration).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Transaction {
+    /// V1 transaction (legacy, uses Groth16 on BN254).
+    V1(ShieldedTransaction),
+
+    /// V2 transaction (post-quantum, uses RISC Zero STARKs).
+    V2(ShieldedTransactionV2),
+
+    /// Migration transaction (V1 inputs -> V2 outputs).
+    Migration(MigrationTransaction),
+}
+
+impl Transaction {
+    /// Get the transaction hash.
+    pub fn hash(&self) -> [u8; 32] {
+        match self {
+            Transaction::V1(tx) => tx.hash(),
+            Transaction::V2(tx) => tx.hash(),
+            Transaction::Migration(tx) => tx.hash(),
+        }
+    }
+
+    /// Get the fee.
+    pub fn fee(&self) -> u64 {
+        match self {
+            Transaction::V1(tx) => tx.fee,
+            Transaction::V2(tx) => tx.fee,
+            Transaction::Migration(tx) => tx.fee,
+        }
+    }
+
+    /// Check if this is a V2 (post-quantum) transaction.
+    pub fn is_pq(&self) -> bool {
+        matches!(self, Transaction::V2(_))
+    }
+
+    /// Check if this is a migration transaction.
+    pub fn is_migration(&self) -> bool {
+        matches!(self, Transaction::Migration(_))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

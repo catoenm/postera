@@ -271,3 +271,64 @@ export function canDecryptNote(encrypted: EncryptedNote, viewingKey: Uint8Array)
  * Must be called before using computeNoteCommitment or deriveNullifier.
  */
 export { initPoseidon } from './poseidon';
+
+// ============================================================================
+// Post-Quantum Exports (V2)
+// ============================================================================
+
+// Re-export PQ commitment functions
+export {
+  commitToValuePQ,
+  commitToNotePQ,
+  deriveNullifierPQ,
+  verifyValueCommitmentPQ,
+  verifyNoteCommitmentPQ,
+  generateRandomnessPQ,
+} from './commitment-pq';
+
+// Re-export PQ Poseidon functions
+export {
+  poseidonPQHash,
+  bytesToGoldilocks,
+  goldilocksToBytes,
+  noteCommitmentPQ,
+  valueCommitmentPQ,
+  deriveNullifierPQ as deriveNullifierPQPoseidon,
+  merkleHashPQ,
+  emptyLeafHashPQ,
+  computeMerkleRootPQ,
+  GOLDILOCKS_PRIME,
+  DOMAIN_NOTE_COMMIT_PQ,
+  DOMAIN_VALUE_COMMIT_PQ,
+  DOMAIN_NULLIFIER_PQ,
+  DOMAIN_MERKLE_EMPTY_PQ,
+  DOMAIN_MERKLE_NODE_PQ,
+} from './poseidon-pq';
+
+// Re-export PQ prover functions
+export {
+  generateTransactionProofPQ,
+  verifyReceiptPQ,
+  deserializeJournal,
+  getReceiptSize,
+  isPlaceholderReceipt,
+  type SpendWitnessPQ,
+  type OutputWitnessPQ,
+  type TransactionJournal,
+  type RiscZeroReceipt,
+  ProofError,
+} from './prover-pq';
+
+// Re-export migration functions
+export {
+  migrateNotesToPQ,
+  isV1Note,
+  isV2Note,
+  estimateMigrationFee,
+  getMigrationStats,
+  type V1Note,
+  type V2Note,
+  type MigrationParams,
+  type MigrationResult,
+  type MigrationTransaction,
+} from './migration';
