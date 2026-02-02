@@ -131,16 +131,21 @@ async fn wait_for_initial_sync(
 
     loop {
         let peers = { state.peers.read().unwrap().clone() };
-        if peers.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No peers available; cannot verify sync before mining."
-            ));
-        }
-
         let (local_height, local_hash) = {
             let chain = state.blockchain.read().unwrap();
             (chain.height(), hex::encode(chain.latest_hash()))
         };
+
+        // Allow solo mining on fresh chain (genesis) when no peers are available
+        if peers.is_empty() {
+            if local_height == 0 {
+                println!("No peers available but chain is at genesis. Starting solo mining...");
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!(
+                "No peers available; cannot verify sync before mining."
+            ));
+        }
 
         let mut best_peer: Option<(String, PeerChainInfo)> = None;
         for peer in &peers {
