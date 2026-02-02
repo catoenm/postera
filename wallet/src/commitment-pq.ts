@@ -33,6 +33,7 @@ import { valueCommitmentPQ as valueCommitmentPQFallback } from './poseidon-pq';
 let wasmInitialized = false;
 let wasmComputeNullifier: ((nk: string, cm: string, pos: string) => string) | null = null;
 let wasmComputeNoteCommitment: ((value: string, pk: string, rand: string) => string) | null = null;
+let wasmComputeMerkleRoot: ((leaf: string, pathJson: string, indicesJson: string) => string) | null = null;
 
 /**
  * Initialize the PQ crypto module.
@@ -54,6 +55,12 @@ export async function initPQCrypto(): Promise<void> {
     // Store references to the WASM functions
     wasmComputeNullifier = wasmModule.compute_nullifier_wasm;
     wasmComputeNoteCommitment = wasmModule.compute_note_commitment_wasm;
+    wasmComputeMerkleRoot = wasmModule.compute_merkle_root_wasm ?? null;
+
+    // Check WASM version to verify correct module is loaded
+    const version = wasmModule.wasm_version?.() ?? 'unknown';
+    console.log(`PQ crypto WASM version: ${version}`);
+    console.log(`WASM Merkle root function: ${wasmComputeMerkleRoot !== null ? 'available' : 'not available'}`);
 
     wasmInitialized = true;
     console.log('PQ crypto initialized with WASM Poseidon');
@@ -242,6 +249,83 @@ export function deriveNullifierPQHex(
   const commitment = hexToBytes(commitmentHex);
   const nullifier = deriveNullifierPQ(nullifierKey, commitment, position);
   return bytesToHex(nullifier);
+}
+
+/**
+ * Compute Merkle root from commitment and path using WASM.
+ * This is useful for debugging Merkle path issues.
+ *
+ * @param commitment - The commitment (leaf) as hex string
+ * @param path - Array of sibling hashes as hex strings
+ * @param indices - Array of path indices (0 = left, 1 = right)
+ * @returns The computed Merkle root as hex string
+ */
+export function computeMerkleRootPQHex(
+  commitmentHex: string,
+  path: string[],
+  indices: number[]
+): string {
+  if (!wasmInitialized || !wasmComputeMerkleRoot) {
+    throw new Error('PQ crypto not initialized or Merkle root function not available');
+  }
+
+  const pathJson = JSON.stringify(path);
+  const indicesJson = JSON.stringify(indices);
+
+  return wasmComputeMerkleRoot(commitmentHex, pathJson, indicesJson);
+}
+
+/**
+ * Debug function: Compare Merkle root computation between WASM and server.
+ * Logs detailed information about any differences.
+ */
+export async function debugCompareMerkleRoot(
+  commitmentHex: string,
+  path: string[],
+  indices: number[],
+  serverUrl: string = ''
+): Promise<{wasmRoot: string, serverRoot?: string, match: boolean}> {
+  if (!wasmInitialized || !wasmComputeMerkleRoot) {
+    throw new Error('PQ crypto not initialized');
+  }
+
+  // Compute using WASM
+  const wasmRoot = computeMerkleRootPQHex(commitmentHex, path, indices);
+  console.log('[Debug] WASM computed root:', wasmRoot);
+
+  // Try to compute using server debug endpoint
+  let serverRoot: string | undefined;
+  try {
+    const response = await fetch(`${serverUrl}/debug/verify-path`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        commitment: commitmentHex,
+        path,
+        indices,
+      }),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      serverRoot = data.computed_root;
+      console.log('[Debug] Server computed root:', serverRoot);
+      console.log('[Debug] Server debug info:', JSON.stringify(data.debug, null, 2));
+    } else {
+      console.log('[Debug] Server verify-path failed:', response.status);
+    }
+  } catch (e) {
+    console.log('[Debug] Could not reach server for comparison');
+  }
+
+  const match = serverRoot === wasmRoot;
+  if (!match && serverRoot) {
+    console.error('[Debug] MISMATCH! WASM and server computed different roots');
+  } else if (match) {
+    console.log('[Debug] MATCH! WASM and server roots are identical');
+  }
+
+  return { wasmRoot, serverRoot, match };
 }
 
 /**

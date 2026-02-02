@@ -22,7 +22,8 @@ use super::poseidon_pq::{
 pub const TREE_DEPTH_PQ: usize = 32;
 
 /// Number of recent roots to keep for anchor validation.
-const RECENT_ROOTS_COUNT: usize = 100;
+/// Larger value handles fast block production during proof generation.
+const RECENT_ROOTS_COUNT: usize = 1000;
 
 /// Hash type for tree nodes (4 field elements = 256 bits = 32 bytes).
 pub type TreeHashPQ = [u8; 32];

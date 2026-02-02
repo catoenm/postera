@@ -18,6 +18,7 @@ import { getOutputsSince, checkNullifiers } from './api';
 import { loadProvingKeys, areProvingKeysLoaded } from './prover';
 import { initBindingCrypto, isBindingCryptoReady } from './binding';
 import { deriveNullifierPQ, initPQCrypto, isPQCryptoInitialized } from './commitment-pq';
+import { getWorkerPool, isWorkerSupported } from './scan-worker-pool';
 import type { WalletNote, ShieldedState, EncryptedOutput } from './types';
 
 /** Whether cryptographic primitives have been initialized */
@@ -155,6 +156,7 @@ export class ShieldedWallet {
   /**
    * Scan the blockchain for incoming notes.
    * Fetches all outputs since lastScannedHeight and attempts decryption.
+   * Uses parallel Web Workers when available for faster scanning.
    */
   async scan(onProgress?: (msg: string) => void): Promise<number> {
     if (this.scanning) {
@@ -198,26 +200,13 @@ export class ShieldedWallet {
       const response = sinceHeight === 0 ? initialResponse : await getOutputsSince(sinceHeight);
       const { outputs } = response;
 
-      onProgress?.(`Processing ${outputs.length} outputs...`);
+      // Use parallel scanning with Web Workers if available and enough outputs
+      const useParallel = isWorkerSupported() && outputs.length > 100;
 
-      for (const output of outputs) {
-        const note = this.tryDecryptOutput(output);
-        if (note) {
-          // Check if we already have this note (by commitment)
-          const existing = this.notes.find((n) => n.commitment === note.commitment);
-          if (!existing) {
-            this.notes.push(note);
-            newNotesFound++;
-            onProgress?.(`Found note: ${this.formatValue(note.value)} PSTR at height ${note.blockHeight}`);
-          }
-
-          // Also create V2 note if this is a V2 wallet and V2/PQ commitment is available
-          this.maybeAddV2Note(output, note);
-        } else {
-          // If V1 decryption failed but there's a V2 commitment, try V2-only processing
-          // This handles pure V2 outputs that don't have a V1 commitment
-          this.maybeAddV2OnlyNote(output);
-        }
+      if (useParallel) {
+        newNotesFound = await this.scanParallel(outputs, onProgress);
+      } else {
+        newNotesFound = this.scanSequential(outputs, onProgress);
       }
 
       this.lastScannedHeight = current_height;
@@ -232,6 +221,99 @@ export class ShieldedWallet {
       onProgress?.(`Scan complete. Found ${newNotesFound} new notes.`);
     } finally {
       this.scanning = false;
+    }
+
+    return newNotesFound;
+  }
+
+  /**
+   * Sequential scanning (fallback when workers unavailable).
+   */
+  private scanSequential(outputs: EncryptedOutput[], onProgress?: (msg: string) => void): number {
+    let newNotesFound = 0;
+    onProgress?.(`Processing ${outputs.length} outputs (sequential)...`);
+
+    for (const output of outputs) {
+      const note = this.tryDecryptOutput(output);
+      if (note) {
+        const existing = this.notes.find((n) => n.commitment === note.commitment);
+        if (!existing) {
+          this.notes.push(note);
+          newNotesFound++;
+          onProgress?.(`Found note: ${this.formatValue(note.value)} PSTR at height ${note.blockHeight}`);
+        }
+        this.maybeAddV2Note(output, note);
+      } else {
+        this.maybeAddV2OnlyNote(output);
+      }
+    }
+
+    return newNotesFound;
+  }
+
+  /**
+   * Parallel scanning using Web Workers.
+   */
+  private async scanParallel(outputs: EncryptedOutput[], onProgress?: (msg: string) => void): Promise<number> {
+    let newNotesFound = 0;
+
+    try {
+      const pool = await getWorkerPool();
+      onProgress?.(`Processing ${outputs.length} outputs (parallel, ${pool.size} workers)...`);
+
+      // Convert outputs for worker
+      const workerOutputs = outputs.map((o) => ({
+        ciphertext: o.ciphertext,
+        ephemeral_pk: o.ephemeral_pk,
+        note_commitment: o.note_commitment,
+        position: typeof o.position === 'bigint' ? Number(o.position) : o.position,
+        block_height: o.block_height,
+      }));
+
+      // Run parallel scan
+      const decryptedNotes = await pool.scan(
+        workerOutputs,
+        this.pkHashHex,
+        bytesToHex(this.nullifierKey),
+        (processed, total) => {
+          const pct = Math.round((processed / total) * 100);
+          onProgress?.(`Scanning: ${pct}% (${processed}/${total})`);
+        }
+      );
+
+      // Process results
+      for (const note of decryptedNotes) {
+        const existing = this.notes.find((n) => n.commitment === note.commitment);
+        if (!existing) {
+          this.notes.push({
+            value: BigInt(note.value),
+            recipientPkHash: note.recipientPkHash,
+            randomness: note.randomness,
+            commitment: note.commitment,
+            position: BigInt(note.position),
+            blockHeight: note.blockHeight,
+            spent: false,
+            nullifier: note.nullifier,
+          });
+          newNotesFound++;
+          onProgress?.(`Found note: ${this.formatValue(BigInt(note.value))} PSTR at height ${note.blockHeight}`);
+        }
+      }
+
+      // Process V2 notes (still need to do this on main thread for now)
+      // TODO: Move V2 scanning to workers as well
+      for (const output of outputs) {
+        const existingNote = this.notes.find((n) => n.commitment === output.note_commitment);
+        if (existingNote) {
+          this.maybeAddV2Note(output, existingNote);
+        } else {
+          this.maybeAddV2OnlyNote(output);
+        }
+      }
+    } catch (error) {
+      // Fall back to sequential on error
+      console.warn('Parallel scan failed, falling back to sequential:', error);
+      return this.scanSequential(outputs, onProgress);
     }
 
     return newNotesFound;

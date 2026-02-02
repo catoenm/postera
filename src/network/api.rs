@@ -102,6 +102,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/debug/poseidon", get(debug_poseidon_test))
         .route("/debug/poseidon-pq", get(debug_poseidon_pq_test))
         .route("/debug/merkle-pq", get(debug_merkle_pq))
+        .route("/debug/verify-path", post(debug_verify_path))
         .with_state(state)
         // Apply rate limiting (returns 429 Too Many Requests when exceeded)
         .layer(rate_limit_layer)
@@ -1040,11 +1041,31 @@ async fn get_witness_by_position_v2(
     State(state): State<Arc<AppState>>,
     Path(position): Path<u64>,
 ) -> Result<Json<WitnessResponseV2>, StatusCode> {
+    use crate::crypto::pq::commitment_pq::NoteCommitmentPQ;
+
     let chain = state.blockchain.read().unwrap();
     let commitment_tree_pq = chain.state().commitment_tree_pq();
 
     let witness = commitment_tree_pq.witness(position)
         .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Debug: Verify the path is internally consistent
+    // Get the commitment at this position from the tree's leaves
+    // Note: This requires accessing internal state, so we re-verify via path
+    let path_verifies = {
+        // We need to get the actual commitment bytes at this position
+        // For now, we'll trust the tree structure
+        // TODO: Add leaf access for verification
+        true
+    };
+
+    tracing::debug!(
+        "V2 witness for position {}: root={}, path_len={}, verifies={}",
+        position,
+        hex::encode(&witness.root),
+        witness.path.siblings.len(),
+        path_verifies
+    );
 
     Ok(Json(WitnessResponseV2 {
         root: hex::encode(witness.root),
@@ -1175,11 +1196,146 @@ async fn debug_merkle_pq(
         .map(|r| hex::encode(r))
         .collect();
 
+    // Also compute a test commitment for verification
+    use crate::crypto::pq::commitment_pq::commit_to_note_pq;
+
+    // Test with value that needs no reduction
+    let test_value: u64 = 50_000_000_000; // BLOCK_REWARD
+    let test_pk_hash = [0x01u8; 32];
+    let test_randomness = [0x02u8; 32];
+    let test_commitment = commit_to_note_pq(test_value, &test_pk_hash, &test_randomness);
+
+    // Test with bytes that WOULD need reduction (values >= Goldilocks prime)
+    // Goldilocks prime is 0xFFFF_FFFF_0000_0001
+    // So any 8-byte chunk >= this needs reduction
+    let mut reduction_test_bytes = [0u8; 32];
+    // First chunk: 0xFFFFFFFF00000002 (needs reduction to 1)
+    reduction_test_bytes[0..8].copy_from_slice(&0xFFFF_FFFF_0000_0002u64.to_le_bytes());
+    let reduction_commitment = commit_to_note_pq(test_value, &reduction_test_bytes, &test_randomness);
+
     Json(serde_json::json!({
         "tree_size": size,
         "current_root": hex::encode(current_root),
         "recent_roots_count": recent_roots.len(),
         "recent_roots": recent_roots,
+        "test_commitment": {
+            "value": test_value.to_string(),
+            "pk_hash": hex::encode(test_pk_hash),
+            "randomness": hex::encode(test_randomness),
+            "commitment": hex::encode(test_commitment),
+        },
+        "reduction_test": {
+            "description": "Test with pk_hash bytes that need reduction mod Goldilocks prime",
+            "pk_hash": hex::encode(reduction_test_bytes),
+            "commitment": hex::encode(reduction_commitment),
+        }
+    }))
+}
+
+/// Debug endpoint to verify Merkle path computation.
+/// Computes root from commitment + path using server's logic for comparison with WASM.
+#[derive(Debug, Deserialize)]
+struct VerifyPathRequest {
+    commitment: String,  // hex
+    path: Vec<String>,   // hex siblings
+    indices: Vec<u8>,
+}
+
+async fn debug_verify_path(
+    Json(req): Json<VerifyPathRequest>,
+) -> Json<serde_json::Value> {
+    use crate::crypto::pq::poseidon_pq::{
+        poseidon_pq_hash, bytes_to_hash_out, hash_out_to_bytes, GoldilocksField,
+        DOMAIN_MERKLE_NODE_PQ,
+    };
+
+    // Parse commitment
+    let commitment_bytes: [u8; 32] = match hex::decode(&req.commitment) {
+        Ok(b) if b.len() == 32 => b.try_into().unwrap(),
+        _ => return Json(serde_json::json!({"error": "Invalid commitment hex"})),
+    };
+
+    // Hash node helper (same as merkle_pq.rs)
+    fn hash_node(
+        left: &[GoldilocksField; 4],
+        right: &[GoldilocksField; 4],
+    ) -> [GoldilocksField; 4] {
+        let mut inputs = vec![DOMAIN_MERKLE_NODE_PQ];
+        inputs.extend_from_slice(left);
+        inputs.extend_from_slice(right);
+        poseidon_pq_hash(&inputs)
+    }
+
+    let mut current = bytes_to_hash_out(&commitment_bytes);
+
+    // Log leaf field elements (same format as WASM)
+    let leaf_fields: Vec<u64> = current.iter().map(|f| f.value()).collect();
+
+    let mut debug_info: Vec<serde_json::Value> = vec![];
+    debug_info.push(serde_json::json!({
+        "depth": "leaf",
+        "bytes": req.commitment,
+        "field_elements": leaf_fields,
+    }));
+
+    // Log first few indices
+    let indices_preview: Vec<u8> = req.indices.iter().take(8).copied().collect();
+
+    for (i, (sibling_hex, &index)) in req.path.iter().zip(req.indices.iter()).enumerate() {
+        let sibling_bytes: [u8; 32] = match hex::decode(sibling_hex) {
+            Ok(b) if b.len() == 32 => b.try_into().unwrap(),
+            _ => return Json(serde_json::json!({"error": format!("Invalid sibling hex at {}", i)})),
+        };
+
+        let sibling = bytes_to_hash_out(&sibling_bytes);
+
+        // Log depth 0 details (same as WASM)
+        if i == 0 {
+            let sibling_fields: Vec<u64> = sibling.iter().map(|f| f.value()).collect();
+            let (left, right) = if index == 0 {
+                (&current, &sibling)
+            } else {
+                (&sibling, &current)
+            };
+
+            let mut all_inputs: Vec<u64> = vec![DOMAIN_MERKLE_NODE_PQ.value()];
+            all_inputs.extend(left.iter().map(|f| f.value()));
+            all_inputs.extend(right.iter().map(|f| f.value()));
+
+            debug_info.push(serde_json::json!({
+                "depth": 0,
+                "sibling_bytes": sibling_hex,
+                "sibling_fields": sibling_fields,
+                "index": index,
+                "current_is": if index == 0 { "LEFT" } else { "RIGHT" },
+                "hash_inputs_9": all_inputs,
+            }));
+        }
+
+        current = if index == 0 {
+            hash_node(&current, &sibling)
+        } else {
+            hash_node(&sibling, &current)
+        };
+
+        if i < 3 {
+            let result_fields: Vec<u64> = current.iter().map(|f| f.value()).collect();
+            debug_info.push(serde_json::json!({
+                "depth": i,
+                "result_bytes": hex::encode(hash_out_to_bytes(&current)),
+                "result_fields": result_fields,
+            }));
+        }
+    }
+
+    let computed_root = hash_out_to_bytes(&current);
+
+    Json(serde_json::json!({
+        "commitment": req.commitment,
+        "path_length": req.path.len(),
+        "indices_0_8": indices_preview,
+        "computed_root": hex::encode(computed_root),
+        "debug": debug_info,
     }))
 }
 

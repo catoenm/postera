@@ -465,6 +465,7 @@ import {
 } from './prover-pq';
 import {
   generateRandomnessPQ,
+  debugCompareMerkleRoot,
 } from './commitment-pq';
 
 /**
@@ -604,6 +605,32 @@ export async function createShieldedTransactionV2(
       pathIndices: witness.indices,  // Use indices from V2 witness
       noteCommitment: hexToBytes(note.commitment),  // Use stored commitment for Merkle verification
     };
+
+    // Debug: Verify WASM commitment matches stored commitment
+    try {
+      const { commitToNotePQHex } = await import('./commitment-pq');
+      const wasmCommitment = commitToNotePQHex(
+        note.value,
+        note.recipientPkHash,
+        note.randomness
+      );
+      console.log(`[Debug] Spend ${i}: stored commitment: ${note.commitment}`);
+      console.log(`[Debug] Spend ${i}: WASM   commitment: ${wasmCommitment}`);
+      console.log(`[Debug] Spend ${i}: server witness root: ${witness.root}`);
+      console.log(`[Debug] Spend ${i}: position: ${note.position}`);
+      console.log(`[Debug] Spend ${i}: path length: ${witness.path.length}`);
+      console.log(`[Debug] Spend ${i}: indices: ${witness.indices.slice(0, 10).join(',')}...`);
+      console.log(`[Debug] Spend ${i}: first sibling: ${witness.path[0]}`);
+      if (note.commitment !== wasmCommitment) {
+        console.error(`[ERROR] Commitment mismatch! WASM computes different commitment than server.`);
+        console.error(`  value: ${note.value}`);
+        console.error(`  pkHash: ${note.recipientPkHash}`);
+        console.error(`  randomness: ${note.randomness}`);
+      }
+    } catch (e) {
+      console.warn('Could not verify commitment:', e);
+    }
+
     spendWitnesses.push(spendWitness);
   }
 
@@ -668,8 +695,28 @@ export async function createShieldedTransactionV2(
     const message = proof.publicInputs.nullifiers[i];
     const signature = sign(message, secretKey);
 
+    const computedAnchor = bytesToHex(proof.publicInputs.merkleRoots[i]);
+    const expectedRoot = bytesToHex(spendWitnesses[i].merkleRoot);
+    console.log(`[Debug] Spend ${i}: WASM computed anchor: ${computedAnchor}`);
+    console.log(`[Debug] Spend ${i}: Server witness root:  ${expectedRoot}`);
+    if (computedAnchor !== expectedRoot) {
+      console.error(`[ERROR] Anchor mismatch! WASM computed different root than server provided.`);
+
+      // Debug: Compare WASM vs server Merkle root computation
+      const noteCommitment = bytesToHex(spendWitnesses[i].noteCommitment);
+      const path = spendWitnesses[i].merklePath.map(bytesToHex);
+      const indices = spendWitnesses[i].pathIndices;
+      console.log(`[Debug] Comparing Merkle root computation for commitment: ${noteCommitment}`);
+      console.log(`[Debug] Path length: ${path.length}, Indices: ${indices.slice(0, 8).join(', ')}...`);
+
+      // This will log detailed debug info from both WASM and server
+      debugCompareMerkleRoot(noteCommitment, path, indices).catch(e => {
+        console.error(`[Debug] Comparison failed:`, e);
+      });
+    }
+
     spendDescriptions.push({
-      anchor: bytesToHex(proof.publicInputs.merkleRoots[i]),
+      anchor: computedAnchor,
       nullifier: bytesToHex(proof.publicInputs.nullifiers[i]),
       signature: bytesToHex(signature),
       public_key: bytesToHex(publicKey),

@@ -419,6 +419,13 @@ impl Default for WasmProver {
 // TypeScript and Rust compute identical values.
 // ============================================================================
 
+/// Get WASM module version for debugging.
+/// Returns version string to verify correct WASM is loaded.
+#[wasm_bindgen]
+pub fn wasm_version() -> String {
+    "0.2.1-merkle-debug".to_string()
+}
+
 /// Compute a note commitment using Plonky2's native Poseidon.
 ///
 /// # Arguments
@@ -465,6 +472,31 @@ pub fn compute_nullifier_wasm(
 
     let nullifier = native_nullifier(&nullifier_key, &commitment, position);
     Ok(hex::encode(nullifier))
+}
+
+/// Compute a Merkle root from a leaf and path (for debugging).
+///
+/// # Arguments
+/// * `leaf_hex` - The leaf commitment (32 bytes, hex)
+/// * `path_json` - JSON array of sibling hashes (hex strings)
+/// * `indices_json` - JSON array of path indices (0 = left, 1 = right)
+///
+/// # Returns
+/// The computed Merkle root as a hex string (32 bytes)
+#[wasm_bindgen]
+pub fn compute_merkle_root_wasm(
+    leaf_hex: &str,
+    path_json: &str,
+    indices_json: &str,
+) -> Result<String, JsError> {
+    let leaf = hex_to_bytes32(leaf_hex)?;
+    let path: Vec<String> = serde_json::from_str(path_json)
+        .map_err(|e| JsError::new(&format!("Invalid path JSON: {}", e)))?;
+    let indices: Vec<u8> = serde_json::from_str(indices_json)
+        .map_err(|e| JsError::new(&format!("Invalid indices JSON: {}", e)))?;
+
+    let root = native_merkle_root(&leaf, &path, &indices)?;
+    Ok(hex::encode(root))
 }
 
 /// Build a transaction circuit for the given shape.
@@ -866,13 +898,19 @@ fn hex_to_bytes32(hex: &str) -> Result<[u8; 32], JsError> {
     Ok(arr)
 }
 
+/// Goldilocks prime: p = 2^64 - 2^32 + 1
+const GOLDILOCKS_PRIME: u64 = 0xFFFF_FFFF_0000_0001;
+
 fn bytes_to_field_elements(bytes: &[u8; 32]) -> [F; 4] {
     let mut result = [F::ZERO; 4];
     for i in 0..4 {
         let mut chunk = [0u8; 8];
         chunk.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
         let val = u64::from_le_bytes(chunk);
-        result[i] = F::from_noncanonical_u64(val);
+        // Reduce mod Goldilocks prime to match server's bytes_to_hash_out behavior.
+        // The server uses GoldilocksField::new() which reduces mod p.
+        let reduced = val % GOLDILOCKS_PRIME;
+        result[i] = F::from_canonical_u64(reduced);
     }
     result
 }
@@ -959,11 +997,33 @@ fn native_merkle_root(leaf: &[u8; 32], path: &[String], indices: &[u8]) -> Resul
     let domain = F::from_canonical_u64(DOMAIN_MERKLE_NODE);
     let mut current = bytes_to_field_elements(leaf);
 
-    for (sibling_hex, &is_right) in path.iter().zip(indices.iter()) {
+    console_log!("=== native_merkle_root DEBUG ===");
+    console_log!("leaf bytes: {}", hex::encode(leaf));
+    console_log!("leaf as field elements: [{}, {}, {}, {}]",
+        current[0].to_canonical_u64(),
+        current[1].to_canonical_u64(),
+        current[2].to_canonical_u64(),
+        current[3].to_canonical_u64()
+    );
+    console_log!("path_len: {}, indices_len: {}", path.len(), indices.len());
+    console_log!("domain: {}", domain.to_canonical_u64());
+
+    // Log first few indices for debugging
+    let indices_preview: Vec<_> = indices.iter().take(8).collect();
+    console_log!("indices[0..8]: {:?}", indices_preview);
+
+    // Log first sibling for debugging
+    if !path.is_empty() {
+        console_log!("path[0] (first sibling): {}", &path[0]);
+    }
+
+    for (i, (sibling_hex, &is_right)) in path.iter().zip(indices.iter()).enumerate() {
         let sibling_bytes = hex_to_bytes32(sibling_hex)?;
         let sibling_fields = bytes_to_field_elements(&sibling_bytes);
 
         // Determine left/right based on is_right flag
+        // is_right=0: current is left child, sibling is right -> hash(current, sibling)
+        // is_right=1: current is right child, sibling is left -> hash(sibling, current)
         let (left, right) = if is_right != 0 {
             (sibling_fields, current)
         } else {
@@ -974,11 +1034,41 @@ fn native_merkle_root(leaf: &[u8; 32], path: &[String], indices: &[u8]) -> Resul
         inputs.extend_from_slice(&left);
         inputs.extend_from_slice(&right);
 
+        if i == 0 {
+            console_log!("depth 0 sibling bytes: {}", sibling_hex);
+            console_log!("depth 0 sibling fields: [{}, {}, {}, {}]",
+                sibling_fields[0].to_canonical_u64(),
+                sibling_fields[1].to_canonical_u64(),
+                sibling_fields[2].to_canonical_u64(),
+                sibling_fields[3].to_canonical_u64()
+            );
+            console_log!("depth 0 is_right: {} (current is {})", is_right, if is_right != 0 { "RIGHT" } else { "LEFT" });
+            console_log!("depth 0 hash inputs (9 elements):");
+            for (j, inp) in inputs.iter().enumerate() {
+                console_log!("  inputs[{}] = {}", j, inp.to_canonical_u64());
+            }
+        }
+
         let hash = native_poseidon(&inputs);
+
+        if i < 3 {
+            console_log!(
+                "depth {}: is_right={}, result=[{},{},{},{}]",
+                i, is_right,
+                hash[0].to_canonical_u64(),
+                hash[1].to_canonical_u64(),
+                hash[2].to_canonical_u64(),
+                hash[3].to_canonical_u64()
+            );
+        }
+
         current = hash;
     }
 
-    Ok(field_elements_to_bytes(&current))
+    let result = field_elements_to_bytes(&current);
+    console_log!("final root: {}", hex::encode(&result));
+    console_log!("=== END native_merkle_root DEBUG ===");
+    Ok(result)
 }
 
 #[cfg(test)]

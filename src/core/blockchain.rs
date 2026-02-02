@@ -127,6 +127,10 @@ impl ShieldedBlockchain {
                 for tx in &block.transactions {
                     state.apply_transaction(tx);
                 }
+                // Apply V2 transactions to state
+                for tx in &block.transactions_v2 {
+                    state.apply_transaction_v2(tx);
+                }
                 state.apply_coinbase(&block.coinbase);
 
                 blocks.insert(hash, block);
