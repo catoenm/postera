@@ -17,6 +17,7 @@ import { hexToBytes, bytesToHex } from './crypto';
 import { getOutputsSince, checkNullifiers } from './api';
 import { loadProvingKeys, areProvingKeysLoaded } from './prover';
 import { initBindingCrypto, isBindingCryptoReady } from './binding';
+import { deriveNullifierPQ, initPQCrypto, isPQCryptoInitialized } from './commitment-pq';
 import type { WalletNote, ShieldedState, EncryptedOutput } from './types';
 
 /** Whether cryptographic primitives have been initialized */
@@ -77,6 +78,12 @@ export class ShieldedWallet {
       onProgress?.('Initializing Poseidon hash...');
       await initPoseidon();
       cryptoInitialized = true;
+    }
+
+    // Initialize PQ crypto (WASM Poseidon for V2 notes)
+    if (!isPQCryptoInitialized()) {
+      onProgress?.('Initializing PQ crypto (Plonky2 Poseidon)...');
+      await initPQCrypto();
     }
 
     if (loadProver && !areProvingKeysLoaded()) {
@@ -191,6 +198,13 @@ export class ShieldedWallet {
             newNotesFound++;
             onProgress?.(`Found note: ${this.formatValue(note.value)} PSTR at height ${note.blockHeight}`);
           }
+
+          // Also create V2 note if this is a V2 wallet and V2/PQ commitment is available
+          this.maybeAddV2Note(output, note);
+        } else {
+          // If V1 decryption failed but there's a V2 commitment, try V2-only processing
+          // This handles pure V2 outputs that don't have a V1 commitment
+          this.maybeAddV2OnlyNote(output);
         }
       }
 
@@ -216,6 +230,12 @@ export class ShieldedWallet {
    * Returns a WalletNote if successful, null otherwise.
    */
   private tryDecryptOutput(output: EncryptedOutput): WalletNote | null {
+    // Skip V2-only outputs that don't have a V1 commitment
+    // (they can only be processed by the V2 wallet via maybeAddV2Note)
+    if (!output.note_commitment || output.note_commitment.length === 0) {
+      return null;
+    }
+
     const decrypted = tryDecryptNoteFromHex(
       output.ciphertext,
       output.ephemeral_pk,
@@ -252,6 +272,22 @@ export class ShieldedWallet {
       spent: false,
       nullifier: bytesToHex(nullifier),
     };
+  }
+
+  /**
+   * Hook for subclasses to add V2 notes when scanning.
+   * Default implementation does nothing.
+   */
+  protected maybeAddV2Note(_output: EncryptedOutput, _note: WalletNote): void {
+    // Base class does nothing - V2 wallet overrides this
+  }
+
+  /**
+   * Hook for subclasses to process V2-only outputs (no V1 commitment).
+   * Default implementation does nothing.
+   */
+  protected maybeAddV2OnlyNote(_output: EncryptedOutput): void {
+    // Base class does nothing - V2 wallet overrides this
   }
 
   /**
@@ -411,4 +447,435 @@ export class ShieldedWallet {
  */
 export function createShieldedWallet(secretKeyHex: string, publicKeyHex: string): ShieldedWallet {
   return ShieldedWallet.fromHex(secretKeyHex, publicKeyHex);
+}
+
+// ============================================================================
+// V2 (Post-Quantum) Note Support
+// ============================================================================
+
+import { type V2Note, getMigrationStats } from './migration';
+
+/**
+ * Extended wallet note type supporting both V1 and V2.
+ */
+export type AnyWalletNote = WalletNote | V2Note;
+
+/**
+ * Extended shielded state supporting V2 notes.
+ */
+export interface ShieldedStateV2 extends ShieldedState {
+  v2Notes?: V2Note[];
+}
+
+/**
+ * Extended ShieldedWallet with V2 (post-quantum) support.
+ */
+export class ShieldedWalletV2 extends ShieldedWallet {
+  /** V2 notes (post-quantum) */
+  v2Notes: V2Note[] = [];
+
+  constructor(secretKey: Uint8Array, publicKey: Uint8Array) {
+    super(secretKey, publicKey);
+    this.loadV2State();
+  }
+
+  /**
+   * Create from hex-encoded keys.
+   */
+  static fromHexV2(secretKeyHex: string, publicKeyHex: string): ShieldedWalletV2 {
+    return new ShieldedWalletV2(hexToBytes(secretKeyHex), hexToBytes(publicKeyHex));
+  }
+
+  /**
+   * Get total balance including both V1 and V2 notes.
+   */
+  get totalBalance(): bigint {
+    const v1Balance = this.balance;
+    const v2Balance = this.v2Notes
+      .filter((n) => !n.spent)
+      .reduce((sum, n) => sum + n.value, 0n);
+    return v1Balance + v2Balance;
+  }
+
+  /**
+   * Get V1 (legacy) balance only.
+   */
+  get v1Balance(): bigint {
+    return this.balance;
+  }
+
+  /**
+   * Get V2 (post-quantum) balance only.
+   */
+  get v2Balance(): bigint {
+    return this.v2Notes
+      .filter((n) => !n.spent)
+      .reduce((sum, n) => sum + n.value, 0n);
+  }
+
+  /**
+   * Get number of unspent V2 notes.
+   */
+  get unspentV2Count(): number {
+    return this.v2Notes.filter((n) => !n.spent).length;
+  }
+
+  /**
+   * Get all unspent V2 notes.
+   */
+  get unspentV2Notes(): V2Note[] {
+    return this.v2Notes.filter((n) => !n.spent);
+  }
+
+  /**
+   * Get all notes (V1 and V2 combined).
+   */
+  get allNotes(): AnyWalletNote[] {
+    return [...this.notes, ...this.v2Notes];
+  }
+
+  /**
+   * Get all unspent notes (V1 and V2 combined).
+   */
+  get allUnspentNotes(): AnyWalletNote[] {
+    return [
+      ...this.notes.filter((n) => !n.spent),
+      ...this.v2Notes.filter((n) => !n.spent),
+    ];
+  }
+
+  /**
+   * Get migration statistics.
+   */
+  get migrationStats() {
+    return getMigrationStats(this.allNotes);
+  }
+
+  /**
+   * Check if wallet needs migration (has V1 notes).
+   */
+  get needsMigration(): boolean {
+    return this.migrationStats.migrationNeeded;
+  }
+
+  /**
+   * Select V1 notes for spending (legacy transactions).
+   */
+  selectV1Notes(amount: bigint): WalletNote[] {
+    return this.selectNotes(amount);
+  }
+
+  /**
+   * Select V2 notes for spending (post-quantum transactions).
+   */
+  selectV2Notes(amount: bigint): V2Note[] {
+    const available = this.unspentV2Notes.sort((a, b) =>
+      a.value > b.value ? -1 : a.value < b.value ? 1 : 0
+    );
+
+    const selected: V2Note[] = [];
+    let total = 0n;
+
+    for (const note of available) {
+      if (total >= amount) {
+        break;
+      }
+      selected.push(note);
+      total += note.value;
+    }
+
+    if (total < amount) {
+      throw new Error(`Insufficient V2 balance: have ${total}, need ${amount}`);
+    }
+
+    return selected;
+  }
+
+  /**
+   * Select notes for spending, preferring V2 (post-quantum) notes.
+   */
+  selectNotesPreferV2(amount: bigint): { v1Notes: WalletNote[]; v2Notes: V2Note[] } {
+    // First try to fulfill from V2 notes only
+    if (this.v2Balance >= amount) {
+      return {
+        v1Notes: [],
+        v2Notes: this.selectV2Notes(amount),
+      };
+    }
+
+    // Then try V2 + V1 combined
+    const v2Notes = this.unspentV2Notes;
+    const v2Total = v2Notes.reduce((sum, n) => sum + n.value, 0n);
+    const remaining = amount - v2Total;
+
+    if (remaining > 0n && this.v1Balance >= remaining) {
+      return {
+        v1Notes: this.selectV1Notes(remaining),
+        v2Notes,
+      };
+    }
+
+    // Not enough funds
+    throw new Error(
+      `Insufficient total balance: have ${this.totalBalance}, need ${amount}`
+    );
+  }
+
+  /**
+   * Add a V2 note (e.g., after migration or receiving).
+   */
+  addV2Note(note: V2Note): void {
+    // Check if we already have this note
+    const existing = this.v2Notes.find((n) => n.commitment === note.commitment);
+    if (!existing) {
+      this.v2Notes.push(note);
+      this.saveV2State();
+    }
+  }
+
+  /**
+   * Override to also create V2 notes when scanning.
+   */
+  protected override maybeAddV2Note(output: EncryptedOutput, note: WalletNote): void {
+    // Only process if V2/PQ commitment is available
+    if (!output.note_commitment_pq || output.note_commitment_pq.length === 0) {
+      return;
+    }
+
+    // Check if we already have this V2 note
+    const existing = this.v2Notes.find((n) => n.commitment === output.note_commitment_pq);
+    if (existing) {
+      return;
+    }
+
+    // Derive V2 nullifier using the V2/PQ commitment
+    const commitmentPqBytes = hexToBytes(output.note_commitment_pq);
+    const nullifierPq = deriveNullifierPQ(this.nullifierKey, commitmentPqBytes, BigInt(output.position));
+
+    this.v2Notes.push({
+      value: note.value,
+      recipientPkHash: note.recipientPkHash,
+      randomness: note.randomness,
+      commitment: output.note_commitment_pq,  // Use V2/PQ commitment
+      position: BigInt(output.position),
+      blockHeight: output.block_height,
+      spent: false,
+      nullifier: bytesToHex(nullifierPq),
+      version: 2,
+    });
+
+    this.saveV2State();
+  }
+
+  /**
+   * Process V2-only outputs (no V1 commitment).
+   * These come from pure V2 transactions.
+   */
+  protected override maybeAddV2OnlyNote(output: EncryptedOutput): void {
+    // Only process if V2/PQ commitment is available
+    if (!output.note_commitment_pq || output.note_commitment_pq.length === 0) {
+      return;
+    }
+
+    // Try to decrypt the note
+    const decrypted = tryDecryptNoteFromHex(
+      output.ciphertext,
+      output.ephemeral_pk,
+      this.pkHash
+    );
+
+    if (!decrypted) {
+      return;
+    }
+
+    // Verify the note is for our pk_hash
+    const recipientPkHashHex = bytesToHex(decrypted.recipientPkHash);
+    if (recipientPkHashHex !== this.pkHashHex) {
+      return;
+    }
+
+    // Check if we already have this V2 note
+    const existing = this.v2Notes.find((n) => n.commitment === output.note_commitment_pq);
+    if (existing) {
+      return;
+    }
+
+    // Derive V2 nullifier using the V2/PQ commitment
+    const commitmentPqBytes = hexToBytes(output.note_commitment_pq);
+    const nullifierPq = deriveNullifierPQ(this.nullifierKey, commitmentPqBytes, BigInt(output.position));
+
+    this.v2Notes.push({
+      value: decrypted.value,
+      recipientPkHash: recipientPkHashHex,
+      randomness: bytesToHex(decrypted.randomness),
+      commitment: output.note_commitment_pq,
+      position: BigInt(output.position),
+      blockHeight: output.block_height,
+      spent: false,
+      nullifier: bytesToHex(nullifierPq),
+      version: 2,
+    });
+
+    this.saveV2State();
+  }
+
+  /**
+   * Mark V2 notes as spent.
+   */
+  markV2NotesSpent(nullifiers: string[]): void {
+    for (const nf of nullifiers) {
+      const note = this.v2Notes.find((n) => n.nullifier === nf);
+      if (note) {
+        note.spent = true;
+      }
+    }
+    this.saveV2State();
+  }
+
+  /**
+   * Check which V2 notes have been spent.
+   */
+  async checkSpentV2(): Promise<void> {
+    const unspentV2Notes = this.v2Notes.filter((n) => !n.spent && n.nullifier);
+
+    if (unspentV2Notes.length === 0) {
+      return;
+    }
+
+    const nullifiers = unspentV2Notes.map((n) => n.nullifier!);
+    const response = await checkNullifiers(nullifiers);
+
+    for (const spentNf of response.spent) {
+      const note = this.v2Notes.find((n) => n.nullifier === spentNf);
+      if (note) {
+        note.spent = true;
+      }
+    }
+
+    this.saveV2State();
+  }
+
+  /**
+   * Override scan to also check V2 spent status.
+   */
+  override async scan(onProgress?: (msg: string) => void): Promise<number> {
+    const result = await super.scan(onProgress);
+
+    // Also check V2 nullifiers for spent status
+    onProgress?.('Checking V2 spent notes...');
+    await this.checkSpentV2();
+
+    return result;
+  }
+
+  /**
+   * Load V2 state from localStorage.
+   */
+  private loadV2State(): void {
+    try {
+      const stored = localStorage.getItem('postera_shielded_state_v2');
+      if (stored) {
+        const state = JSON.parse(stored, (key, value) => {
+          if (key === 'position' || key === 'value') {
+            return BigInt(value);
+          }
+          return value;
+        });
+        this.v2Notes = state.v2Notes || [];
+      }
+    } catch (e) {
+      console.error('Failed to load V2 shielded state:', e);
+    }
+  }
+
+  /**
+   * Save V2 state to localStorage.
+   */
+  private saveV2State(): void {
+    try {
+      const json = JSON.stringify(
+        { v2Notes: this.v2Notes },
+        (_, value) => {
+          if (typeof value === 'bigint') {
+            return value.toString();
+          }
+          return value;
+        }
+      );
+      localStorage.setItem('postera_shielded_state_v2', json);
+    } catch (e) {
+      console.error('Failed to save V2 shielded state:', e);
+    }
+  }
+
+  /**
+   * Clear all V2 state.
+   */
+  clearV2State(): void {
+    this.v2Notes = [];
+    localStorage.removeItem('postera_shielded_state_v2');
+  }
+
+  /**
+   * Clear V2 state and rescan to recompute nullifiers.
+   *
+   * Use this when nullifier computation has been fixed and you need
+   * to recompute nullifiers for existing V2 notes.
+   */
+  async rescanV2Notes(onProgress?: (msg: string) => void): Promise<number> {
+    onProgress?.('Clearing V2 state...');
+    this.clearV2State();
+
+    // Reset last scanned height to force full rescan
+    const originalHeight = this.lastScannedHeight;
+    this.lastScannedHeight = -1;
+    this.saveState();
+
+    onProgress?.('Rescanning blockchain for V2 notes...');
+    const notesFound = await this.scan(onProgress);
+
+    onProgress?.(`Rescan complete. Found ${this.v2Notes.length} V2 notes.`);
+    return notesFound;
+  }
+
+  /**
+   * Clear all state (V1 and V2).
+   */
+  override clearState(): void {
+    super.clearState();
+    this.clearV2State();
+  }
+
+  /**
+   * Get extended summary including V2 stats.
+   */
+  getExtendedSummary(): {
+    v1Balance: string;
+    v2Balance: string;
+    totalBalance: string;
+    v1UnspentCount: number;
+    v2UnspentCount: number;
+    needsMigration: boolean;
+    lastScannedHeight: number;
+  } {
+    return {
+      v1Balance: this.formatValue(this.v1Balance),
+      v2Balance: this.formatValue(this.v2Balance),
+      totalBalance: this.formatValue(this.totalBalance),
+      v1UnspentCount: this.unspentCount,
+      v2UnspentCount: this.unspentV2Count,
+      needsMigration: this.needsMigration,
+      lastScannedHeight: this.lastScannedHeight,
+    };
+  }
+}
+
+/**
+ * Create a V2-enabled shielded wallet.
+ */
+export function createShieldedWalletV2(
+  secretKeyHex: string,
+  publicKeyHex: string
+): ShieldedWalletV2 {
+  return ShieldedWalletV2.fromHexV2(secretKeyHex, publicKeyHex);
 }

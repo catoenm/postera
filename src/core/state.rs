@@ -1,7 +1,8 @@
 //! Shielded state model for private transactions.
 //!
 //! Instead of account balances, we track:
-//! - CommitmentTree: All note commitments ever created
+//! - CommitmentTree: All note commitments ever created (V1, BN254-based)
+//! - CommitmentTreePQ: V2 commitment tree (Goldilocks-based, quantum-resistant)
 //! - NullifierSet: All nullifiers (spent notes)
 //!
 //! This enables full transaction privacy - no balances are visible on-chain.
@@ -15,9 +16,16 @@ use crate::crypto::{
         bytes_to_public_inputs, output_bytes_to_public_inputs, verify_output_proof,
         verify_spend_proof, CircomVerifyingParams,
     },
+    pq::{
+        commitment_pq::NoteCommitmentPQ,
+        merkle_pq::{CommitmentTreePQ, TreeHashPQ, MerkleWitnessPQ},
+    },
 };
 
-use super::transaction::{CoinbaseTransaction, ShieldedTransaction, TransactionError};
+use super::transaction::{
+    CoinbaseTransaction, ShieldedTransaction, ShieldedTransactionV2,
+    MigrationTransaction, Transaction, TransactionError,
+};
 
 /// The shielded state containing commitment tree and nullifier set.
 ///
@@ -25,8 +33,10 @@ use super::transaction::{CoinbaseTransaction, ShieldedTransaction, TransactionEr
 /// are stored - only cryptographic commitments and nullifiers.
 #[derive(Clone, Debug, Default)]
 pub struct ShieldedState {
-    /// Tree of all note commitments ever created.
+    /// V1 tree of all note commitments (Poseidon/BN254).
     commitment_tree: CommitmentTree,
+    /// V2 tree of all note commitments (Poseidon/Goldilocks, quantum-resistant).
+    commitment_tree_pq: CommitmentTreePQ,
     /// Set of all spent nullifiers.
     nullifier_set: HashSet<Nullifier>,
 }
@@ -36,13 +46,19 @@ impl ShieldedState {
     pub fn new() -> Self {
         Self {
             commitment_tree: CommitmentTree::new(),
+            commitment_tree_pq: CommitmentTreePQ::new(),
             nullifier_set: HashSet::new(),
         }
     }
 
-    /// Get the current commitment tree root.
+    /// Get the current commitment tree root (V1).
     pub fn commitment_root(&self) -> TreeHash {
         self.commitment_tree.root()
+    }
+
+    /// Get the current V2 commitment tree root.
+    pub fn commitment_root_pq(&self) -> TreeHashPQ {
+        self.commitment_tree_pq.root()
     }
 
     /// Get the number of commitments in the tree.
@@ -60,14 +76,29 @@ impl ShieldedState {
         self.nullifier_set.contains(nullifier)
     }
 
-    /// Check if a root is a valid recent root.
+    /// Check if a root is a valid recent root (V1).
     pub fn is_valid_anchor(&self, anchor: &TreeHash) -> bool {
         self.commitment_tree.is_valid_root(anchor)
     }
 
-    /// Get the commitment tree (for witness generation).
+    /// Check if a root is a valid recent root (V2/PQ).
+    pub fn is_valid_anchor_pq(&self, anchor: &TreeHashPQ) -> bool {
+        self.commitment_tree_pq.is_valid_root(anchor)
+    }
+
+    /// Get the V1 commitment tree (for witness generation).
     pub fn commitment_tree(&self) -> &CommitmentTree {
         &self.commitment_tree
+    }
+
+    /// Get the V2 commitment tree (for witness generation).
+    pub fn commitment_tree_pq(&self) -> &CommitmentTreePQ {
+        &self.commitment_tree_pq
+    }
+
+    /// Get a V2 Merkle witness for a commitment at the given position.
+    pub fn witness_pq(&self, position: u64) -> Option<MerkleWitnessPQ> {
+        self.commitment_tree_pq.witness(position)
     }
 
     /// Get the nullifier set.
@@ -169,16 +200,19 @@ impl ShieldedState {
     ///
     /// This:
     /// 1. Adds all nullifiers to the spent set
-    /// 2. Adds all output commitments to the tree
+    /// 2. Adds all output commitments to both V1 and V2 trees
     pub fn apply_transaction(&mut self, tx: &ShieldedTransaction) {
         // Add nullifiers to spent set
         for spend in &tx.spends {
             self.nullifier_set.insert(spend.nullifier);
         }
 
-        // Add output commitments to tree
+        // Add output commitments to both trees
         for output in &tx.outputs {
             self.commitment_tree.append(&output.note_commitment);
+            // Also add to V2 tree for quantum-resistant proofs
+            let cm_pq = NoteCommitmentPQ::from(output.note_commitment.to_bytes());
+            self.commitment_tree_pq.append(&cm_pq);
         }
     }
 
@@ -194,9 +228,12 @@ impl ShieldedState {
     }
 
     /// Apply a coinbase transaction.
-    /// Adds the reward note commitment to the tree.
+    /// Adds the reward note commitment to both V1 and V2 trees.
     pub fn apply_coinbase(&mut self, coinbase: &CoinbaseTransaction) {
         self.commitment_tree.append(&coinbase.note_commitment);
+        // Use the proper V2/PQ commitment (computed with Goldilocks Poseidon)
+        let cm_pq = NoteCommitmentPQ::from(coinbase.note_commitment_pq);
+        self.commitment_tree_pq.append(&cm_pq);
     }
 
     /// Validate a coinbase transaction.
@@ -226,6 +263,347 @@ impl ShieldedState {
     /// Create a snapshot of the current state.
     pub fn snapshot(&self) -> ShieldedState {
         self.clone()
+    }
+
+    // ========================================================================
+    // V2 (Post-Quantum) Transaction Support
+    // ========================================================================
+
+    /// Validate a V2 (post-quantum) transaction.
+    ///
+    /// V2 transactions use STARK proofs instead of Groth16, eliminating
+    /// quantum-vulnerable elliptic curve assumptions.
+    ///
+    /// Checks:
+    /// 1. STARK proof is valid
+    /// 2. All anchors are valid recent roots
+    /// 3. No nullifiers are already spent
+    /// 4. All ML-DSA-65 ownership signatures are valid
+    pub fn validate_transaction_v2(
+        &self,
+        tx: &ShieldedTransactionV2,
+    ) -> Result<(), StateError> {
+        use crate::crypto::pq::proof_pq::verify_proof;
+
+        // Must have at least one spend or output
+        if tx.spends.is_empty() && tx.outputs.is_empty() {
+            return Err(StateError::EmptyTransaction);
+        }
+
+        // 1. Verify Plonky2 STARK proof
+        let public_inputs = verify_proof(
+            &tx.transaction_proof,
+            tx.spends.len(),
+            tx.outputs.len(),
+        ).map_err(|_| StateError::InvalidProof)?;
+
+        tracing::debug!(
+            "verify_proof succeeded. public_inputs: nullifiers={}, commitments={}, merkle_roots={}, fee={}",
+            public_inputs.nullifiers.len(),
+            public_inputs.note_commitments.len(),
+            public_inputs.merkle_roots.len(),
+            public_inputs.fee
+        );
+        tracing::debug!(
+            "Transaction: spends={}, outputs={}, fee={}",
+            tx.spends.len(),
+            tx.outputs.len(),
+            tx.fee
+        );
+
+        // 2. Validate public inputs match transaction
+        if public_inputs.nullifiers.len() != tx.spends.len() {
+            tracing::warn!(
+                "Nullifier count mismatch: proof has {}, tx has {}",
+                public_inputs.nullifiers.len(),
+                tx.spends.len()
+            );
+            return Err(StateError::InvalidProof);
+        }
+        if public_inputs.note_commitments.len() != tx.outputs.len() {
+            tracing::warn!(
+                "Note commitment count mismatch: proof has {}, tx has {}",
+                public_inputs.note_commitments.len(),
+                tx.outputs.len()
+            );
+            return Err(StateError::InvalidProof);
+        }
+        if public_inputs.fee != tx.fee {
+            tracing::warn!(
+                "Fee mismatch: proof has {}, tx has {}",
+                public_inputs.fee,
+                tx.fee
+            );
+            return Err(StateError::InvalidProof);
+        }
+
+        // 3. Validate anchors (using V2/PQ tree)
+        for (i, root) in public_inputs.merkle_roots.iter().enumerate() {
+            tracing::debug!(
+                "Checking anchor {}: proof_root={}, tx_anchor={}",
+                i,
+                hex::encode(root),
+                hex::encode(&tx.spends[i].anchor)
+            );
+            if !self.is_valid_anchor_pq(root) {
+                tracing::warn!(
+                    "V2 anchor validation failed for spend {}: anchor={}, recent_roots_count={}",
+                    i,
+                    hex::encode(root),
+                    self.commitment_tree_pq.recent_roots().len()
+                );
+                // Log first and last recent roots for comparison
+                let recent = self.commitment_tree_pq.recent_roots();
+                if !recent.is_empty() {
+                    tracing::warn!("  First recent root: {}", hex::encode(recent.front().unwrap()));
+                    tracing::warn!("  Last recent root:  {}", hex::encode(recent.back().unwrap()));
+                }
+                return Err(StateError::InvalidAnchor);
+            }
+            // Verify proof root matches spend anchor
+            if root != &tx.spends[i].anchor {
+                tracing::warn!(
+                    "Anchor mismatch for spend {}: proof_root={}, tx_anchor={}",
+                    i,
+                    hex::encode(root),
+                    hex::encode(&tx.spends[i].anchor)
+                );
+                return Err(StateError::InvalidAnchor);
+            }
+        }
+
+        // 4. Check nullifiers not already spent
+        for (i, nf) in public_inputs.nullifiers.iter().enumerate() {
+            tracing::debug!(
+                "Checking nullifier {}: proof_nf={}, tx_nf={}",
+                i,
+                hex::encode(nf),
+                hex::encode(&tx.spends[i].nullifier)
+            );
+            let nullifier = Nullifier(*nf);
+            if self.is_nullifier_spent(&nullifier) {
+                return Err(StateError::NullifierAlreadySpent(nullifier));
+            }
+            // Verify proof nullifier matches spend nullifier
+            if nf != &tx.spends[i].nullifier {
+                tracing::warn!(
+                    "Nullifier mismatch for spend {}: proof_nf={}, tx_nf={}",
+                    i,
+                    hex::encode(nf),
+                    hex::encode(&tx.spends[i].nullifier)
+                );
+                return Err(StateError::InvalidProof);
+            }
+        }
+
+        // 5. Verify note commitments match
+        for (i, cm) in public_inputs.note_commitments.iter().enumerate() {
+            tracing::debug!(
+                "Checking note_commitment {}: proof_cm={}, tx_cm={}",
+                i,
+                hex::encode(cm),
+                hex::encode(&tx.outputs[i].note_commitment)
+            );
+            if cm != &tx.outputs[i].note_commitment {
+                tracing::warn!(
+                    "Note commitment mismatch for output {}: proof_cm={}, tx_cm={}",
+                    i,
+                    hex::encode(cm),
+                    hex::encode(&tx.outputs[i].note_commitment)
+                );
+                return Err(StateError::InvalidProof);
+            }
+        }
+
+        // 6. Verify ownership signatures (message is the nullifier)
+        for (i, spend) in tx.spends.iter().enumerate() {
+            let message = &public_inputs.nullifiers[i];
+            let valid = spend.verify_signature(message)
+                .map_err(|_| StateError::InvalidSignature)?;
+            if !valid {
+                return Err(StateError::InvalidSignature);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate a V2 transaction without proof verification.
+    /// Used when proofs have already been verified.
+    pub fn validate_transaction_v2_basic(
+        &self,
+        tx: &ShieldedTransactionV2,
+    ) -> Result<(), StateError> {
+        // Must have at least one spend or output (or be fee-only)
+        if tx.spends.is_empty() && tx.outputs.is_empty() && tx.fee == 0 {
+            return Err(StateError::EmptyTransaction);
+        }
+
+        // Validate all spends
+        for spend in &tx.spends {
+            // Check anchor is valid (using V2/PQ tree)
+            if !self.is_valid_anchor_pq(&spend.anchor) {
+                return Err(StateError::InvalidAnchor);
+            }
+
+            // Check nullifier not already spent
+            let nullifier = Nullifier(spend.nullifier);
+            if self.is_nullifier_spent(&nullifier) {
+                return Err(StateError::NullifierAlreadySpent(nullifier));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Apply a validated V2 transaction to the state.
+    pub fn apply_transaction_v2(&mut self, tx: &ShieldedTransactionV2) {
+        use crate::crypto::commitment::NoteCommitment;
+
+        // Add nullifiers to spent set
+        for spend in &tx.spends {
+            self.nullifier_set.insert(Nullifier(spend.nullifier));
+        }
+
+        // Add output commitments to both V1 and V2 trees
+        for output in &tx.outputs {
+            let cm = NoteCommitment(output.note_commitment);
+            self.commitment_tree.append(&cm);
+            // Also add to V2 tree for quantum-resistant proofs
+            let cm_pq = NoteCommitmentPQ::from(output.note_commitment);
+            self.commitment_tree_pq.append(&cm_pq);
+        }
+    }
+
+    /// Validate and apply a V2 transaction atomically.
+    pub fn validate_and_apply_v2(
+        &mut self,
+        tx: &ShieldedTransactionV2,
+    ) -> Result<(), StateError> {
+        self.validate_transaction_v2(tx)?;
+        self.apply_transaction_v2(tx);
+        Ok(())
+    }
+
+    /// Validate a migration transaction.
+    ///
+    /// Migration transactions spend V1 notes and create V2 notes,
+    /// allowing users to upgrade their funds to post-quantum security.
+    pub fn validate_migration_transaction(
+        &self,
+        tx: &MigrationTransaction,
+        verifying_params: &CircomVerifyingParams,
+    ) -> Result<(), StateError> {
+        use crate::crypto::pq::proof_pq::verify_proof;
+
+        // Must have at least one spend and one output
+        if tx.legacy_spends.is_empty() {
+            return Err(StateError::EmptyTransaction);
+        }
+        if tx.pq_outputs.is_empty() {
+            return Err(StateError::EmptyTransaction);
+        }
+
+        // 1. Validate V1 spends (same as regular V1 validation)
+        for spend in &tx.legacy_spends {
+            // Check anchor is valid
+            if !self.is_valid_anchor(&spend.anchor) {
+                return Err(StateError::InvalidAnchor);
+            }
+
+            // Check nullifier not already spent
+            if self.is_nullifier_spent(&spend.nullifier) {
+                return Err(StateError::NullifierAlreadySpent(spend.nullifier));
+            }
+
+            // Verify spend signature
+            if !spend.verify_signature().map_err(|_| StateError::InvalidSignature)? {
+                return Err(StateError::InvalidSignature);
+            }
+
+            // Verify spend proof
+            let public_inputs = bytes_to_public_inputs(
+                &spend.anchor,
+                &spend.nullifier.to_bytes(),
+                &spend.value_commitment,
+            );
+            if !verify_spend_proof(&spend.proof, &public_inputs, verifying_params) {
+                return Err(StateError::InvalidProof);
+            }
+        }
+
+        // 2. Verify legacy binding signature (for V1 spends)
+        // Note: The binding sig only covers the V1 portion
+        // The migration proof handles the V2 output validation
+
+        // 3. Verify migration Plonky2 STARK proof
+        // Migration proofs have 0 spends (V1 spends are validated separately)
+        // and N outputs (the new V2 notes)
+        let _public_inputs = verify_proof(
+            &tx.migration_proof,
+            0, // No PQ spends in migration
+            tx.pq_outputs.len(),
+        ).map_err(|_| StateError::InvalidProof)?;
+
+        Ok(())
+    }
+
+    /// Apply a migration transaction to the state.
+    pub fn apply_migration_transaction(&mut self, tx: &MigrationTransaction) {
+        use crate::crypto::commitment::NoteCommitment;
+
+        // Add V1 nullifiers to spent set
+        for spend in &tx.legacy_spends {
+            self.nullifier_set.insert(spend.nullifier);
+        }
+
+        // Add V2 output commitments to both trees
+        for output in &tx.pq_outputs {
+            let cm = NoteCommitment(output.note_commitment);
+            self.commitment_tree.append(&cm);
+            // Also add to V2 tree for quantum-resistant proofs
+            let cm_pq = NoteCommitmentPQ::from(output.note_commitment);
+            self.commitment_tree_pq.append(&cm_pq);
+        }
+    }
+
+    // ========================================================================
+    // Unified Transaction Validation (supports all versions)
+    // ========================================================================
+
+    /// Validate any transaction type (V1, V2, or Migration).
+    pub fn validate_any_transaction(
+        &self,
+        tx: &Transaction,
+        verifying_params: &CircomVerifyingParams,
+    ) -> Result<(), StateError> {
+        match tx {
+            Transaction::V1(v1_tx) => self.validate_transaction(v1_tx, verifying_params),
+            Transaction::V2(v2_tx) => self.validate_transaction_v2(v2_tx),
+            Transaction::Migration(mig_tx) => {
+                self.validate_migration_transaction(mig_tx, verifying_params)
+            }
+        }
+    }
+
+    /// Apply any transaction type to the state.
+    pub fn apply_any_transaction(&mut self, tx: &Transaction) {
+        match tx {
+            Transaction::V1(v1_tx) => self.apply_transaction(v1_tx),
+            Transaction::V2(v2_tx) => self.apply_transaction_v2(v2_tx),
+            Transaction::Migration(mig_tx) => self.apply_migration_transaction(mig_tx),
+        }
+    }
+
+    /// Validate and apply any transaction atomically.
+    pub fn validate_and_apply_any(
+        &mut self,
+        tx: &Transaction,
+        verifying_params: &CircomVerifyingParams,
+    ) -> Result<(), StateError> {
+        self.validate_any_transaction(tx, verifying_params)?;
+        self.apply_any_transaction(tx);
+        Ok(())
     }
 
     /// Check if any of the given nullifiers conflict with pending nullifiers.

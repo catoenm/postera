@@ -9,12 +9,12 @@ import {
   MLDSA65_SK_SIZE,
 } from './crypto';
 import { computePkHash } from './shielded-crypto';
-import { ShieldedWallet } from './shielded-wallet';
+import { ShieldedWallet, ShieldedWalletV2 } from './shielded-wallet';
 import {
-  createShieldedTransaction,
+  createShieldedTransactionV2,
   validateTransactionParams,
 } from './transaction-builder';
-import { submitShieldedTransaction } from './api';
+import { submitShieldedTransactionV2 } from './api';
 import type { Wallet as WalletType } from './types';
 import './App.css';
 
@@ -26,7 +26,7 @@ export default function Wallet() {
   const [view, setView] = useState<'wallet' | 'send' | 'receive' | 'sign'>('wallet');
 
   // Shielded wallet state
-  const [shieldedWallet, setShieldedWallet] = useState<ShieldedWallet | null>(null);
+  const [shieldedWallet, setShieldedWallet] = useState<ShieldedWalletV2 | null>(null);
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState<string>('');
   const [balance, setBalance] = useState<string>('0');
@@ -71,19 +71,36 @@ export default function Wallet() {
         // Initialize Poseidon hash before creating wallet (required for nullifier derivation)
         await ShieldedWallet.initialize(false, (msg) => setScanStatus(msg));
 
-        const sw = ShieldedWallet.fromHex(wallet.secret_key, wallet.public_key);
+        const sw = ShieldedWalletV2.fromHexV2(wallet.secret_key, wallet.public_key);
         setShieldedWallet(sw);
         updateBalanceDisplay(sw);
+
+        // Expose for debugging (remove in production)
+        (window as any).wallet = sw;
+        (window as any).debugWallet = () => {
+          console.log('=== WALLET DEBUG ===');
+          console.log('V2 Balance:', sw.v2Balance.toString());
+          console.log('V2 Unspent Count:', sw.unspentV2Count);
+          console.log('V2 Notes:');
+          sw.v2Notes.forEach((n, i) => {
+            console.log(`  [${i}] value=${n.value}, spent=${n.spent}, nullifier=${n.nullifier?.slice(0, 20)}...`);
+          });
+          console.log('V1 Balance:', sw.v1Balance.toString());
+          console.log('V1 Unspent Count:', sw.unspentCount);
+          return { v2Notes: sw.v2Notes, v1Notes: sw.notes };
+        };
+        console.log('Wallet exposed on window. Run debugWallet() to see state.');
       };
       initializeWallet().catch(console.error);
     }
   }, [wallet]);
 
-  // Update balance display from shielded wallet
-  const updateBalanceDisplay = useCallback((sw: ShieldedWallet) => {
-    const summary = sw.getSummary();
-    setBalance(summary.balance);
-    setUnspentCount(summary.unspentCount);
+  // Update balance display from shielded wallet (V2 enabled)
+  const updateBalanceDisplay = useCallback((sw: ShieldedWalletV2) => {
+    const summary = sw.getExtendedSummary();
+    // Show V2 balance since we send V2 transactions
+    setBalance(summary.v2Balance);
+    setUnspentCount(summary.v2UnspentCount);
   }, []);
 
   // Scan for notes
@@ -181,6 +198,7 @@ export default function Wallet() {
     if (confirm('Are you sure you want to logout? Make sure you have backed up your keys!')) {
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem('postera_shielded_state');
+      localStorage.removeItem('postera_shielded_state_v2');
       setWallet(null);
       setShieldedWallet(null);
     }
@@ -217,13 +235,12 @@ export default function Wallet() {
     setSendResult(null);
 
     try {
-      // Ensure proving keys are loaded (required for ZK proof generation)
-      if (!ShieldedWallet.isProverReady) {
-        setSendResult({ success: false, message: 'Loading ZK proving keys...' });
-        await ShieldedWallet.initialize(true, (msg) => {
-          setSendResult({ success: false, message: msg });
-        });
-      }
+      // Initialize V2 (Plonky2) prover for quantum-resistant proofs
+      setSendResult({ success: false, message: 'Initializing quantum-resistant prover...' });
+      const { initProver, prebuildCircuit } = await import('./prover-pq');
+      await initProver();
+      // Pre-build circuit for 1 spend, 1 output (common case)
+      await prebuildCircuit(1, 1);
 
       // Parse amounts
       const amount = ShieldedWallet.parseAmount(sendAmount);
@@ -235,8 +252,8 @@ export default function Wallet() {
         throw new Error('Recipient pk_hash must be 64 hex characters');
       }
 
-      // Select notes
-      const notesToSpend = shieldedWallet.selectNotes(amount + fee);
+      // Select V2 (post-quantum) notes
+      const notesToSpend = shieldedWallet.selectV2Notes(amount + fee);
 
       // Validate
       const validationError = validateTransactionParams({
@@ -252,9 +269,9 @@ export default function Wallet() {
         throw new Error(validationError);
       }
 
-      // Build transaction with progress updates
-      setSendResult({ success: false, message: `Preparing transaction with ${notesToSpend.length} note(s)...` });
-      const tx = await createShieldedTransaction({
+      // Build V2 (post-quantum) transaction with progress updates
+      setSendResult({ success: false, message: `Preparing V2 (quantum-resistant) transaction with ${notesToSpend.length} note(s)...` });
+      const tx = await createShieldedTransactionV2({
         spendNotes: notesToSpend,
         recipients: [{ pkHash: recipientPkHash, amount }],
         fee,
@@ -266,9 +283,9 @@ export default function Wallet() {
         },
       });
 
-      // Submit
-      setSendResult({ success: false, message: 'Submitting transaction to network...' });
-      const result = await submitShieldedTransaction(tx);
+      // Submit V2 transaction
+      setSendResult({ success: false, message: 'Submitting V2 transaction to network...' });
+      const result = await submitShieldedTransactionV2(tx);
 
       if ('error' in result) {
         throw new Error(result.error);

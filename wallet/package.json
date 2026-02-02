@@ -17,11 +17,16 @@
     "buffer": "^6.0.3",
     "circomlibjs": "^0.1.7",
     "ffjavascript": "^0.3.1",
+    "postera-plonky2-wasm": "file:../plonky2-wasm/pkg",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.13.0",
     "snarkjs": "^0.7.4",
     "vite-plugin-node-polyfills": "^0.25.0"
+  },
+  "pqComments": {
+    "_note": "Post-quantum dependencies",
+    "_plonky2": "postera-plonky2-wasm provides WASM STARK proving for V2 transactions (browser-compatible)"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

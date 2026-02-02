@@ -107,10 +107,61 @@ export async function getWitnessByPosition(position: number | bigint): Promise<W
 }
 
 /**
- * Submit a shielded transaction.
+ * V2 witness response format (quantum-resistant Merkle tree).
+ */
+export interface WitnessResponseV2 {
+  root: string;       // hex
+  path: string[];     // hex array
+  indices: number[];  // path direction indices
+  position: number;
+}
+
+/**
+ * Get a V2 Merkle witness by position (for quantum-resistant transactions).
+ * Uses Poseidon/Goldilocks Merkle tree instead of BN254.
+ */
+export async function getWitnessByPositionV2(position: number | bigint): Promise<WitnessResponseV2> {
+  const res = await fetch(`${API_BASE}/witness/v2/position/${position}`);
+  if (!res.ok) {
+    throw new Error(`Failed to get V2 witness by position: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Submit a V1 shielded transaction.
  */
 export async function submitShieldedTransaction(tx: unknown): Promise<{ hash: string; status: string } | { error: string }> {
   const res = await fetch(`${API_BASE}/tx`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transaction: tx }),
+  });
+
+  // Handle both JSON and plain text responses
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // Response was plain text
+    if (!res.ok) {
+      return { error: text };
+    }
+    return { error: `Unexpected response: ${text}` };
+  }
+
+  if (!res.ok) {
+    return { error: typeof data === 'string' ? data : JSON.stringify(data) };
+  }
+  return data as { hash: string; status: string };
+}
+
+/**
+ * Submit a V2 (post-quantum) shielded transaction.
+ */
+export async function submitShieldedTransactionV2(tx: unknown): Promise<{ hash: string; status: string } | { error: string }> {
+  const res = await fetch(`${API_BASE}/tx/v2`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ transaction: tx }),

@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::transaction::{CoinbaseTransaction, ShieldedTransaction};
+use super::transaction::{CoinbaseTransaction, ShieldedTransaction, ShieldedTransactionV2};
 
 pub const BLOCK_HASH_SIZE: usize = 32;
 
@@ -110,6 +110,9 @@ impl BlockHeaderHashPrefix {
 pub struct ShieldedBlock {
     pub header: BlockHeader,
     pub transactions: Vec<ShieldedTransaction>,
+    /// V2 transactions (post-quantum). Added in block version 3.
+    #[serde(default)]
+    pub transactions_v2: Vec<ShieldedTransactionV2>,
     pub coinbase: CoinbaseTransaction,
 }
 
@@ -123,13 +126,30 @@ impl ShieldedBlock {
         nullifier_root: [u8; BLOCK_HASH_SIZE],
         difficulty: u64,
     ) -> Self {
-        // Compute merkle root of transaction hashes + coinbase
+        Self::new_with_v2(prev_hash, transactions, vec![], coinbase, commitment_root, nullifier_root, difficulty)
+    }
+
+    /// Create a new shielded block with V2 transactions.
+    pub fn new_with_v2(
+        prev_hash: [u8; BLOCK_HASH_SIZE],
+        transactions: Vec<ShieldedTransaction>,
+        transactions_v2: Vec<ShieldedTransactionV2>,
+        coinbase: CoinbaseTransaction,
+        commitment_root: [u8; BLOCK_HASH_SIZE],
+        nullifier_root: [u8; BLOCK_HASH_SIZE],
+        difficulty: u64,
+    ) -> Self {
+        // Compute merkle root of all transaction hashes + coinbase
         let mut tx_hashes: Vec<[u8; 32]> = transactions.iter().map(|tx| tx.hash()).collect();
+        tx_hashes.extend(transactions_v2.iter().map(|tx| tx.hash()));
         tx_hashes.push(coinbase.hash());
         let merkle_root = compute_merkle_root(&tx_hashes);
 
+        // Use version 3 if we have V2 transactions
+        let version = if transactions_v2.is_empty() { 2 } else { 3 };
+
         let header = BlockHeader {
-            version: 2, // Version 2 for shielded blocks
+            version,
             prev_hash,
             merkle_root,
             commitment_root,
@@ -145,6 +165,7 @@ impl ShieldedBlock {
         Self {
             header,
             transactions,
+            transactions_v2,
             coinbase,
         }
     }
@@ -177,14 +198,16 @@ impl ShieldedBlock {
         Self {
             header,
             transactions: Vec::new(),
+            transactions_v2: Vec::new(),
             coinbase,
         }
     }
 
     /// Verify the block's structure and proof-of-work.
     pub fn verify(&self) -> Result<(), BlockError> {
-        // Verify merkle root
+        // Verify merkle root (includes V1, V2 transactions, and coinbase)
         let mut tx_hashes: Vec<[u8; 32]> = self.transactions.iter().map(|tx| tx.hash()).collect();
+        tx_hashes.extend(self.transactions_v2.iter().map(|tx| tx.hash()));
         tx_hashes.push(self.coinbase.hash());
         let computed_root = compute_merkle_root(&tx_hashes);
         if computed_root != self.header.merkle_root {
@@ -201,7 +224,9 @@ impl ShieldedBlock {
 
     /// Get the total fees from all transactions in this block.
     pub fn total_fees(&self) -> u64 {
-        self.transactions.iter().map(|tx| tx.fee).sum()
+        let v1_fees: u64 = self.transactions.iter().map(|tx| tx.fee).sum();
+        let v2_fees: u64 = self.transactions_v2.iter().map(|tx| tx.fee).sum();
+        v1_fees + v2_fees
     }
 
     /// Get all nullifiers introduced by this block.
@@ -355,6 +380,7 @@ mod tests {
     fn dummy_coinbase(height: u64) -> CoinbaseTransaction {
         CoinbaseTransaction::new(
             NoteCommitment([1u8; 32]),
+            [1u8; 32], // V2/PQ commitment (dummy for tests)
             EncryptedNote {
                 ciphertext: vec![0; 64],
                 ephemeral_pk: vec![0; 32],

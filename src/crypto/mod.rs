@@ -10,6 +10,9 @@ pub mod proof;
 pub mod snarkjs;
 pub mod binding;
 
+// Post-quantum cryptography module (V2)
+pub mod pq;
+
 pub use keys::KeyPair;
 pub use address::Address;
 pub use signature::{sign, verify, Signature};

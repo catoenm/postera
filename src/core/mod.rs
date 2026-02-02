@@ -18,6 +18,9 @@ pub use block::{
 pub use transaction::{
     BindingSignature, CoinbaseTransaction, LegacyTransaction, OutputDescription,
     ShieldedTransaction, SpendDescription, TransactionError,
+    // V2 (Post-Quantum) types
+    SpendDescriptionV2, OutputDescriptionV2, ShieldedTransactionV2,
+    MigrationTransaction, Transaction,
 };
 pub use state::{ShieldedState, StateError};
 pub use blockchain::{ShieldedBlockchain, ChainInfo};

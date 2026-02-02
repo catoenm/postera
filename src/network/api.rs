@@ -19,7 +19,7 @@ use tower_governor::{
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
-use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction};
+use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction, ShieldedTransactionV2, Transaction};
 use crate::crypto::nullifier::Nullifier;
 use tracing::{info, warn};
 
@@ -80,6 +80,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/block/:hash", get(get_block))
         .route("/block/height/:height", get(get_block_by_height))
         .route("/tx", post(submit_transaction))
+        .route("/tx/v2", post(submit_transaction_v2))
         .route("/tx/:hash", get(get_transaction))
         .route("/transactions/recent", get(get_recent_transactions))
         .route("/mempool", get(get_mempool))
@@ -96,8 +97,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/nullifiers/check", post(check_nullifiers))
         .route("/witness/:commitment", get(get_witness))
         .route("/witness/position/:position", get(get_witness_by_position))
+        .route("/witness/v2/position/:position", get(get_witness_by_position_v2))
         .route("/debug/commitments", get(debug_list_commitments))
         .route("/debug/poseidon", get(debug_poseidon_test))
+        .route("/debug/poseidon-pq", get(debug_poseidon_pq_test))
+        .route("/debug/merkle-pq", get(debug_merkle_pq))
         .with_state(state)
         // Apply rate limiting (returns 429 Too Many Requests when exceeded)
         .layer(rate_limit_layer)
@@ -152,9 +156,11 @@ struct BlockResponse {
     difficulty: u64,
     nonce: u64,
     tx_count: usize,
+    tx_count_v2: usize,
     commitment_root: String,
     nullifier_root: String,
     transactions: Vec<String>,
+    transactions_v2: Vec<String>,
     coinbase_reward: u64,
     total_fees: u64,
     // Encrypted note data for miner monitoring (encrypted, so privacy-preserving)
@@ -203,9 +209,11 @@ fn block_to_response(block: &ShieldedBlock, height: u64) -> BlockResponse {
         difficulty: block.header.difficulty,
         nonce: block.header.nonce,
         tx_count: block.transactions.len(),
+        tx_count_v2: block.transactions_v2.len(),
         commitment_root: hex::encode(block.header.commitment_root),
         nullifier_root: hex::encode(block.header.nullifier_root),
         transactions: block.transactions.iter().map(|tx| hex::encode(tx.hash())).collect(),
+        transactions_v2: block.transactions_v2.iter().map(|tx| hex::encode(tx.hash())).collect(),
         coinbase_reward: block.coinbase.reward,
         total_fees: block.total_fees(),
         coinbase_ephemeral_pk: hex::encode(&block.coinbase.encrypted_note.ephemeral_pk),
@@ -275,7 +283,7 @@ async fn get_recent_transactions(
 ) -> Json<Vec<TransactionResponse>> {
     let mut transactions = Vec::new();
 
-    // Get pending transactions from mempool
+    // Get pending V1 transactions from mempool
     {
         let mempool = state.mempool.read().unwrap();
         for tx in mempool.get_transactions(10) {
@@ -288,6 +296,23 @@ async fn get_recent_transactions(
                 block_height: None,
             });
         }
+        // Get pending V2 transactions from mempool
+        for tx in mempool.get_v2_transactions(10) {
+            use crate::core::Transaction as TxEnum;
+            let (fee, spend_count, output_count) = match &tx {
+                TxEnum::V1(v1) => (v1.fee, v1.spends.len(), v1.outputs.len()),
+                TxEnum::V2(v2) => (v2.fee, v2.spends.len(), v2.outputs.len()),
+                TxEnum::Migration(m) => (m.fee, m.legacy_spends.len(), m.pq_outputs.len()),
+            };
+            transactions.push(TransactionResponse {
+                hash: hex::encode(tx.hash()),
+                fee,
+                spend_count,
+                output_count,
+                status: "pending (v2)".to_string(),
+                block_height: None,
+            });
+        }
     }
 
     // Get recent confirmed transactions from last few blocks
@@ -296,6 +321,7 @@ async fn get_recent_transactions(
 
     for h in (start_height..=chain.height()).rev() {
         if let Some(block) = chain.get_block_by_height(h) {
+            // V1 transactions
             for tx in &block.transactions {
                 transactions.push(TransactionResponse {
                     hash: hex::encode(tx.hash()),
@@ -303,6 +329,17 @@ async fn get_recent_transactions(
                     spend_count: tx.spends.len(),
                     output_count: tx.outputs.len(),
                     status: "confirmed".to_string(),
+                    block_height: Some(h),
+                });
+            }
+            // V2 transactions
+            for tx in &block.transactions_v2 {
+                transactions.push(TransactionResponse {
+                    hash: hex::encode(tx.hash()),
+                    fee: tx.fee,
+                    spend_count: tx.spends.len(),
+                    output_count: tx.outputs.len(),
+                    status: "confirmed (v2)".to_string(),
                     block_height: Some(h),
                 });
             }
@@ -387,6 +424,61 @@ async fn submit_transaction(
     }))
 }
 
+/// V2 transaction submission request (post-quantum).
+#[derive(Deserialize)]
+struct SubmitTxV2Request {
+    transaction: ShieldedTransactionV2,
+}
+
+/// Submit a V2 (post-quantum) shielded transaction.
+async fn submit_transaction_v2(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SubmitTxV2Request>,
+) -> Result<Json<SubmitTxResponse>, (StatusCode, String)> {
+    let tx = req.transaction;
+    let hash = hex::encode(tx.hash());
+
+    info!("Received V2 transaction: {}", &hash[..16]);
+
+    // Wrap in Transaction enum for validation and mempool
+    let wrapped_tx = Transaction::V2(tx.clone());
+
+    // Validate V2 transaction
+    {
+        let chain = state.blockchain.read().unwrap();
+        chain
+            .state()
+            .validate_transaction_v2(&tx)
+            .map_err(|e| {
+                warn!("V2 transaction validation failed: {}", e);
+                (StatusCode::BAD_REQUEST, e.to_string())
+            })?;
+    }
+
+    // Add to mempool
+    let added = {
+        let mut mempool = state.mempool.write().unwrap();
+        mempool.add_v2(wrapped_tx.clone())
+    };
+
+    if !added {
+        return Err((
+            StatusCode::CONFLICT,
+            "Transaction already in mempool or conflicts with pending".to_string(),
+        ));
+    }
+
+    info!("V2 transaction {} added to mempool", &hash[..16]);
+
+    // TODO: Relay V2 transactions to peers
+    // For now, V2 transactions stay in local mempool
+
+    Ok(Json(SubmitTxResponse {
+        hash,
+        status: "pending".to_string(),
+    }))
+}
+
 #[derive(Serialize)]
 struct MempoolResponse {
     count: usize,
@@ -396,11 +488,15 @@ struct MempoolResponse {
 
 async fn get_mempool(State(state): State<Arc<AppState>>) -> Json<MempoolResponse> {
     let mempool = state.mempool.read().unwrap();
-    let txs = mempool.get_transactions(100);
+    let v1_txs = mempool.get_transactions(100);
+    let v2_txs = mempool.get_v2_transactions(100);
+
+    let mut tx_hashes: Vec<String> = v1_txs.iter().map(|tx| hex::encode(tx.hash())).collect();
+    tx_hashes.extend(v2_txs.iter().map(|tx| hex::encode(tx.hash())));
 
     Json(MempoolResponse {
         count: mempool.len(),
-        transactions: txs.iter().map(|tx| hex::encode(tx.hash())).collect(),
+        transactions: tx_hashes,
         total_fees: mempool.total_fees(),
     })
 }
@@ -446,7 +542,7 @@ async fn receive_block(
                 mempool.remove_confirmed(&tx_hashes);
 
                 // Remove transactions with now-spent nullifiers
-                let nullifiers: Vec<_> = block.nullifiers();
+                let nullifiers: Vec<[u8; 32]> = block.nullifiers().iter().map(|n| n.0).collect();
                 mempool.remove_spent_nullifiers(&nullifiers);
 
                 // Re-validate remaining mempool transactions
@@ -694,8 +790,10 @@ struct EncryptedOutput {
     position: u64,
     /// Block height where this output was created.
     block_height: u64,
-    /// The note commitment (hex).
+    /// The note commitment V1/BN254 (hex).
     note_commitment: String,
+    /// The note commitment V2/PQ Goldilocks (hex) - for post-quantum transactions.
+    note_commitment_pq: String,
     /// Ephemeral public key for decryption (hex).
     ephemeral_pk: String,
     /// Encrypted note ciphertext (hex).
@@ -740,6 +838,9 @@ async fn get_outputs_since(
             for tx in &block.transactions {
                 position += tx.outputs.len() as u64;
             }
+            for tx in &block.transactions_v2 {
+                position += tx.outputs.len() as u64;
+            }
             position += 1; // coinbase
         }
     }
@@ -747,13 +848,14 @@ async fn get_outputs_since(
     // Now collect outputs from start_height onwards
     for h in start_height..=end_height {
         if let Some(block) = chain.get_block_by_height(h) {
-            // Transaction outputs
+            // V1 Transaction outputs (note_commitment_pq not available for legacy tx)
             for tx in &block.transactions {
                 for output in &tx.outputs {
                     outputs.push(EncryptedOutput {
                         position,
                         block_height: h,
                         note_commitment: hex::encode(output.note_commitment.to_bytes()),
+                        note_commitment_pq: String::new(), // V1 tx don't have PQ commitments
                         ephemeral_pk: hex::encode(&output.encrypted_note.ephemeral_pk),
                         ciphertext: hex::encode(&output.encrypted_note.ciphertext),
                     });
@@ -761,11 +863,27 @@ async fn get_outputs_since(
                 }
             }
 
-            // Coinbase output
+            // V2 Transaction outputs (only have PQ commitments)
+            for tx in &block.transactions_v2 {
+                for output in &tx.outputs {
+                    outputs.push(EncryptedOutput {
+                        position,
+                        block_height: h,
+                        note_commitment: String::new(), // V2 tx don't have legacy commitments
+                        note_commitment_pq: hex::encode(output.note_commitment),
+                        ephemeral_pk: hex::encode(&output.encrypted_note.ephemeral_pk),
+                        ciphertext: hex::encode(&output.encrypted_note.ciphertext),
+                    });
+                    position += 1;
+                }
+            }
+
+            // Coinbase output (has both V1 and V2/PQ commitments)
             outputs.push(EncryptedOutput {
                 position,
                 block_height: h,
                 note_commitment: hex::encode(block.coinbase.note_commitment.to_bytes()),
+                note_commitment_pq: hex::encode(block.coinbase.note_commitment_pq),
                 ephemeral_pk: hex::encode(&block.coinbase.encrypted_note.ephemeral_pk),
                 ciphertext: hex::encode(&block.coinbase.encrypted_note.ciphertext),
             });
@@ -902,6 +1020,40 @@ async fn get_witness_by_position(
     }))
 }
 
+/// Response for V2 witness endpoint.
+/// Uses Poseidon/Goldilocks Merkle tree (quantum-resistant).
+#[derive(Serialize)]
+struct WitnessResponseV2 {
+    /// The current V2 commitment tree root (hex).
+    root: String,
+    /// The Merkle path (sibling hashes from leaf to root, hex encoded).
+    path: Vec<String>,
+    /// Path indices (0 = left, 1 = right).
+    indices: Vec<u8>,
+    /// Position in the tree.
+    position: u64,
+}
+
+/// Get V2 witness by position (for quantum-resistant transactions).
+/// Uses Poseidon/Goldilocks Merkle tree instead of BN254.
+async fn get_witness_by_position_v2(
+    State(state): State<Arc<AppState>>,
+    Path(position): Path<u64>,
+) -> Result<Json<WitnessResponseV2>, StatusCode> {
+    let chain = state.blockchain.read().unwrap();
+    let commitment_tree_pq = chain.state().commitment_tree_pq();
+
+    let witness = commitment_tree_pq.witness(position)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(WitnessResponseV2 {
+        root: hex::encode(witness.root),
+        path: witness.path.siblings.iter().map(|h| hex::encode(h)).collect(),
+        indices: witness.path.indices.clone(),
+        position: witness.position,
+    }))
+}
+
 /// Debug endpoint to test Poseidon hash compatibility.
 /// Returns the hash of inputs [1,2,3,4] for comparison with circomlibjs.
 async fn debug_poseidon_test() -> Json<serde_json::Value> {
@@ -935,6 +1087,55 @@ async fn debug_poseidon_test() -> Json<serde_json::Value> {
     }))
 }
 
+/// Debug endpoint for V2/PQ Poseidon hash (Goldilocks field).
+/// Returns hash of [1,2,3,4] and Merkle node hash for comparison with TypeScript.
+async fn debug_poseidon_pq_test() -> Json<serde_json::Value> {
+    use crate::crypto::pq::poseidon_pq::{
+        poseidon_pq_hash, hash_out_to_bytes, GoldilocksField,
+        DOMAIN_MERKLE_NODE_PQ, DOMAIN_MERKLE_EMPTY_PQ,
+    };
+
+    // Test 1: Simple hash of [1,2,3,4]
+    let inputs: Vec<GoldilocksField> = vec![
+        GoldilocksField::new(1),
+        GoldilocksField::new(2),
+        GoldilocksField::new(3),
+        GoldilocksField::new(4),
+    ];
+    let hash1 = poseidon_pq_hash(&inputs);
+    let hash1_bytes = hash_out_to_bytes(&hash1);
+
+    // Test 2: Empty leaf hash
+    let empty_hash = poseidon_pq_hash(&[DOMAIN_MERKLE_EMPTY_PQ]);
+    let empty_bytes = hash_out_to_bytes(&empty_hash);
+
+    // Test 3: Merkle node hash of two empty leaves
+    let mut node_inputs = vec![DOMAIN_MERKLE_NODE_PQ];
+    node_inputs.extend_from_slice(&empty_hash);
+    node_inputs.extend_from_slice(&empty_hash);
+    let node_hash = poseidon_pq_hash(&node_inputs);
+    let node_bytes = hash_out_to_bytes(&node_hash);
+
+    Json(serde_json::json!({
+        "test": "V2/PQ Poseidon compatibility (Goldilocks)",
+        "hash_1234": {
+            "description": "poseidon_pq_hash([1,2,3,4])",
+            "hex": hex::encode(hash1_bytes),
+            "elements": hash1.map(|f| f.0.to_string()),
+        },
+        "empty_leaf": {
+            "description": "poseidon_pq_hash([DOMAIN_MERKLE_EMPTY_PQ])",
+            "hex": hex::encode(empty_bytes),
+            "elements": empty_hash.map(|f| f.0.to_string()),
+        },
+        "merkle_node_empty_empty": {
+            "description": "merkle_hash(empty, empty)",
+            "hex": hex::encode(node_bytes),
+            "elements": node_hash.map(|f| f.0.to_string()),
+        },
+    }))
+}
+
 /// Debug endpoint to list all commitments in the tree.
 async fn debug_list_commitments(
     State(state): State<Arc<AppState>>,
@@ -957,6 +1158,28 @@ async fn debug_list_commitments(
         "tree_size": tree_size,
         "root": hex::encode(commitment_tree.root()),
         "commitments": commitments
+    }))
+}
+
+/// Debug endpoint to show V2/PQ Merkle tree state and recent roots.
+async fn debug_merkle_pq(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let chain = state.blockchain.read().unwrap();
+    let tree_pq = chain.state().commitment_tree_pq();
+
+    let size = tree_pq.size();
+    let current_root = tree_pq.root();
+    let recent_roots: Vec<String> = tree_pq.recent_roots()
+        .iter()
+        .map(|r| hex::encode(r))
+        .collect();
+
+    Json(serde_json::json!({
+        "tree_size": size,
+        "current_root": hex::encode(current_root),
+        "recent_roots_count": recent_roots.len(),
+        "recent_roots": recent_roots,
     }))
 }
 

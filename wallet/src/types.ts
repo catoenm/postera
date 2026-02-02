@@ -51,6 +51,8 @@ export interface EncryptedOutput {
   position: number;
   block_height: number;
   note_commitment: string;
+  /** V2/PQ commitment (Goldilocks Poseidon) - empty for legacy V1 transactions */
+  note_commitment_pq: string;
   ephemeral_pk: string;
   ciphertext: string;
 }

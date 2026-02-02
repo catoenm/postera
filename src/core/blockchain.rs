@@ -13,12 +13,13 @@ use crate::consensus::{
 use crate::crypto::{
     note::{Note, ViewingKey},
     proof::CircomVerifyingParams,
+    pq::commitment_pq::commit_to_note_pq,
 };
 use crate::storage::Database;
 
 use super::block::{BlockError, ShieldedBlock, BLOCK_HASH_SIZE};
 use super::state::{ShieldedState, StateError};
-use super::transaction::{CoinbaseTransaction, ShieldedTransaction};
+use super::transaction::{CoinbaseTransaction, ShieldedTransaction, ShieldedTransactionV2};
 
 /// The mining reward in smallest units.
 pub const BLOCK_REWARD: u64 = 50_000_000_000; // 50 coins with 9 decimal places
@@ -157,6 +158,7 @@ impl ShieldedBlockchain {
 
             let genesis_coinbase = CoinbaseTransaction::new(
                 NoteCommitment([0u8; 32]),
+                [0u8; 32], // V2/PQ commitment (dummy for genesis)
                 EncryptedNote {
                     ciphertext: vec![0; 64],
                     ephemeral_pk: vec![0; 32],
@@ -200,13 +202,23 @@ impl ShieldedBlockchain {
         miner_pk_hash: [u8; 32],
         _viewing_key: &ViewingKey,  // Kept for API compatibility but not used
     ) -> CoinbaseTransaction {
+        use ark_serialize::CanonicalSerialize;
+
         let mut rng = ark_std::rand::thread_rng();
         let note = Note::new(BLOCK_REWARD, miner_pk_hash, &mut rng);
         // Encrypt using miner's pk_hash so they can decrypt it
         let miner_key = ViewingKey::from_pk_hash(miner_pk_hash);
         let encrypted = miner_key.encrypt_note(&note, &mut rng);
 
-        CoinbaseTransaction::new(note.commitment(), encrypted, BLOCK_REWARD, 0)
+        // Compute V1 commitment (BN254 Poseidon)
+        let commitment_v1 = note.commitment();
+
+        // Compute V2/PQ commitment (Goldilocks Poseidon) for post-quantum security
+        let mut randomness_bytes = [0u8; 32];
+        note.randomness.serialize_compressed(&mut randomness_bytes[..]).unwrap();
+        let commitment_pq = commit_to_note_pq(BLOCK_REWARD, &miner_pk_hash, &randomness_bytes);
+
+        CoinbaseTransaction::new(commitment_v1, commitment_pq, encrypted, BLOCK_REWARD, 0)
     }
 
     /// Set the verifying parameters for proof verification.
@@ -332,7 +344,7 @@ impl ShieldedBlockchain {
             .validate_coinbase(&block.coinbase, expected_reward, expected_height)
             .map_err(|e| BlockchainError::StateError(e))?;
 
-        // Validate all transactions
+        // Validate all V1 transactions
         if let Some(ref params) = self.verifying_params {
             for tx in &block.transactions {
                 self.state
@@ -348,10 +360,20 @@ impl ShieldedBlockchain {
             }
         }
 
+        // Validate all V2 transactions
+        for tx in &block.transactions_v2 {
+            self.state
+                .validate_transaction_v2(tx)
+                .map_err(|e| BlockchainError::StateError(e))?;
+        }
+
         // Verify commitment root matches expected
         let mut temp_state = self.state.snapshot();
         for tx in &block.transactions {
             temp_state.apply_transaction(tx);
+        }
+        for tx in &block.transactions_v2 {
+            temp_state.apply_transaction_v2(tx);
         }
         temp_state.apply_coinbase(&block.coinbase);
 
@@ -376,10 +398,18 @@ impl ShieldedBlockchain {
             db.save_block(&block, new_height)
                 .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
 
-            // Save nullifiers from this block
+            // Save nullifiers from V1 transactions
             for tx in &block.transactions {
                 for spend in &tx.spends {
                     db.save_nullifier(&spend.nullifier.to_bytes())
+                        .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
+                }
+            }
+
+            // Save nullifiers from V2 transactions
+            for tx in &block.transactions_v2 {
+                for spend in &tx.spends {
+                    db.save_nullifier(&spend.nullifier)
                         .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
                 }
             }
@@ -393,9 +423,13 @@ impl ShieldedBlockchain {
                 .map_err(|e| BlockchainError::StorageError(e.to_string()))?;
         }
 
-        // Apply transactions to state
+        // Apply V1 transactions to state
         for tx in &block.transactions {
             self.state.apply_transaction(tx);
+        }
+        // Apply V2 transactions to state
+        for tx in &block.transactions_v2 {
+            self.state.apply_transaction_v2(tx);
         }
         self.state.apply_coinbase(&block.coinbase);
 
@@ -581,6 +615,8 @@ impl ShieldedBlockchain {
         _viewing_key: &ViewingKey,  // Kept for API compatibility but not used
         extra_fees: u64,
     ) -> CoinbaseTransaction {
+        use ark_serialize::CanonicalSerialize;
+
         let mut rng = ark_std::rand::thread_rng();
         let height = self.height() + 1;
         let reward = BLOCK_REWARD + extra_fees;
@@ -590,7 +626,15 @@ impl ShieldedBlockchain {
         let miner_key = ViewingKey::from_pk_hash(miner_pk_hash);
         let encrypted = miner_key.encrypt_note(&note, &mut rng);
 
-        CoinbaseTransaction::new(note.commitment(), encrypted, reward, height)
+        // Compute V1 commitment (BN254 Poseidon)
+        let commitment_v1 = note.commitment();
+
+        // Compute V2/PQ commitment (Goldilocks Poseidon) for post-quantum security
+        let mut randomness_bytes = [0u8; 32];
+        note.randomness.serialize_compressed(&mut randomness_bytes[..]).unwrap();
+        let commitment_pq = commit_to_note_pq(reward, &miner_pk_hash, &randomness_bytes);
+
+        CoinbaseTransaction::new(commitment_v1, commitment_pq, encrypted, reward, height)
     }
 
     /// Create a new block template for mining.
@@ -600,13 +644,28 @@ impl ShieldedBlockchain {
         viewing_key: &ViewingKey,
         transactions: Vec<ShieldedTransaction>,
     ) -> ShieldedBlock {
-        let total_fees: u64 = transactions.iter().map(|tx| tx.fee).sum();
+        self.create_block_template_with_v2(miner_pk_hash, viewing_key, transactions, vec![])
+    }
+
+    /// Create a new block template for mining with V2 transactions.
+    pub fn create_block_template_with_v2(
+        &self,
+        miner_pk_hash: [u8; 32],
+        viewing_key: &ViewingKey,
+        transactions: Vec<ShieldedTransaction>,
+        transactions_v2: Vec<ShieldedTransactionV2>,
+    ) -> ShieldedBlock {
+        let total_fees: u64 = transactions.iter().map(|tx| tx.fee).sum::<u64>()
+            + transactions_v2.iter().map(|tx| tx.fee).sum::<u64>();
         let coinbase = self.create_coinbase(miner_pk_hash, viewing_key, total_fees);
 
         // Calculate commitment root after applying transactions
         let mut temp_state = self.state.snapshot();
         for tx in &transactions {
             temp_state.apply_transaction(tx);
+        }
+        for tx in &transactions_v2 {
+            temp_state.apply_transaction_v2(tx);
         }
         temp_state.apply_coinbase(&coinbase);
         let commitment_root = temp_state.commitment_root();
@@ -620,9 +679,10 @@ impl ShieldedBlockchain {
             hash
         };
 
-        ShieldedBlock::new(
+        ShieldedBlock::new_with_v2(
             self.latest_hash(),
             transactions,
+            transactions_v2,
             coinbase,
             commitment_root,
             nullifier_root,
