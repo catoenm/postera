@@ -13,7 +13,7 @@ import {
   deriveNullifierKey,
 } from './shielded-crypto';
 import { sign, hexToBytes, bytesToHex } from './crypto';
-import { getWitnessByPosition } from './api';
+import { getWitnessByPosition, getWitnessByPositionV2 } from './api';
 import {
   generateSpendProof,
   generateOutputProof,
@@ -464,7 +464,6 @@ import {
   type OutputWitnessPQ,
 } from './prover-pq';
 import {
-  commitToNotePQ,
   generateRandomnessPQ,
 } from './commitment-pq';
 
@@ -590,8 +589,8 @@ export async function createShieldedTransactionV2(
 
     const note = spendNotes[i];
 
-    // Get Merkle witness from server
-    const witness = await getWitnessByPosition(note.position);
+    // Get V2 Merkle witness from server (uses Poseidon/Goldilocks tree)
+    const witness = await getWitnessByPositionV2(note.position);
 
     // Build spend witness for STARK
     const spendWitness: SpendWitnessPQ = {
@@ -602,7 +601,8 @@ export async function createShieldedTransactionV2(
       position: note.position,
       merkleRoot: hexToBytes(witness.root),
       merklePath: witness.path.map((p) => hexToBytes(p)),
-      pathIndices: positionToPathIndices(note.position, 32),
+      pathIndices: witness.indices,  // Use indices from V2 witness
+      noteCommitment: hexToBytes(note.commitment),  // Use stored commitment for Merkle verification
     };
     spendWitnesses.push(spendWitness);
   }
@@ -612,6 +612,9 @@ export async function createShieldedTransactionV2(
   const outputWitnesses: OutputWitnessPQ[] = [];
   const outputDescriptions: OutputDescriptionV2[] = [];
   const viewingKey = deriveViewingKey(secretKey);
+
+  // Temporary storage for encrypted notes (we'll build full descriptions after proof generation)
+  const encryptedNotes: { ciphertext: Uint8Array; ephemeralPk: Uint8Array }[] = [];
 
   for (let i = 0; i < outputParams.length; i++) {
     currentStep++;
@@ -630,19 +633,9 @@ export async function createShieldedTransactionV2(
       randomness,
     });
 
-    // Compute PQ commitment
-    const commitment = commitToNotePQ(amount, pkHashBytes, randomness);
-
-    // Encrypt note
+    // Encrypt note (commitment will come from proof)
     const encrypted = encryptNote(amount, pkHashBytes, randomness, viewingKey);
-
-    outputDescriptions.push({
-      note_commitment: bytesToHex(commitment),
-      encrypted_note: {
-        ciphertext: Array.from(encrypted.ciphertext),
-        ephemeral_pk: Array.from(encrypted.ephemeralPk),
-      },
-    });
+    encryptedNotes.push(encrypted);
   }
 
   // Generate combined STARK proof
@@ -655,20 +648,24 @@ export async function createShieldedTransactionV2(
     fee
   );
 
+  // Build output descriptions using note commitments from the proof
+  // This ensures the commitments match what the circuit computed (using Plonky2's native Poseidon)
+  for (let i = 0; i < outputParams.length; i++) {
+    outputDescriptions.push({
+      note_commitment: bytesToHex(proof.publicInputs.noteCommitments[i]),
+      encrypted_note: {
+        ciphertext: Array.from(encryptedNotes[i].ciphertext),
+        ephemeral_pk: Array.from(encryptedNotes[i].ephemeralPk),
+      },
+    });
+  }
+
   // Sign spends with ML-DSA-65
   progress('Signing spends...');
 
   for (let i = 0; i < spendNotes.length; i++) {
-    // Create signing message: anchor + nullifier + fee
-    // This binds the signature to the specific spend in this transaction
-    const feeBytes = new Uint8Array(8);
-    new DataView(feeBytes.buffer).setBigUint64(0, fee, true);
-
-    const message = new Uint8Array([
-      ...proof.publicInputs.merkleRoots[i],
-      ...proof.publicInputs.nullifiers[i],
-      ...feeBytes,
-    ]);
+    // Sign the nullifier - server verifies signature over nullifier only
+    const message = proof.publicInputs.nullifiers[i];
     const signature = sign(message, secretKey);
 
     spendDescriptions.push({

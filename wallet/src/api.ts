@@ -107,6 +107,28 @@ export async function getWitnessByPosition(position: number | bigint): Promise<W
 }
 
 /**
+ * V2 witness response format (quantum-resistant Merkle tree).
+ */
+export interface WitnessResponseV2 {
+  root: string;       // hex
+  path: string[];     // hex array
+  indices: number[];  // path direction indices
+  position: number;
+}
+
+/**
+ * Get a V2 Merkle witness by position (for quantum-resistant transactions).
+ * Uses Poseidon/Goldilocks Merkle tree instead of BN254.
+ */
+export async function getWitnessByPositionV2(position: number | bigint): Promise<WitnessResponseV2> {
+  const res = await fetch(`${API_BASE}/witness/v2/position/${position}`);
+  if (!res.ok) {
+    throw new Error(`Failed to get V2 witness by position: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
  * Submit a V1 shielded transaction.
  */
 export async function submitShieldedTransaction(tx: unknown): Promise<{ hash: string; status: string } | { error: string }> {

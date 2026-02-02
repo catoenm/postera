@@ -290,8 +290,13 @@ impl ShieldedTransaction {
 /// Creates a new note for the miner without any spends.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoinbaseTransaction {
-    /// Commitment to the reward note.
+    /// Commitment to the reward note (V1/BN254).
     pub note_commitment: NoteCommitment,
+
+    /// Commitment to the reward note (V2/PQ Goldilocks).
+    /// Uses Poseidon over Goldilocks field for post-quantum security.
+    #[serde(default)]
+    pub note_commitment_pq: [u8; 32],
 
     /// Encrypted note (miner's wallet decrypts this).
     pub encrypted_note: EncryptedNote,
@@ -307,12 +312,14 @@ impl CoinbaseTransaction {
     /// Create a new coinbase transaction.
     pub fn new(
         note_commitment: NoteCommitment,
+        note_commitment_pq: [u8; 32],
         encrypted_note: EncryptedNote,
         reward: u64,
         height: u64,
     ) -> Self {
         Self {
             note_commitment,
+            note_commitment_pq,
             encrypted_note,
             reward,
             height,
@@ -800,6 +807,7 @@ mod tests {
 
         let coinbase = CoinbaseTransaction::new(
             NoteCommitment([1u8; 32]),
+            [1u8; 32], // V2/PQ commitment (dummy for tests)
             encrypted,
             50,
             1,

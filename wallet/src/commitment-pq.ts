@@ -13,15 +13,17 @@
  *
  * Unlike Pedersen commitments, these are NOT homomorphic.
  * Balance verification happens inside the STARK proof instead.
+ *
+ * ## Hash Format
+ *
+ * To match Plonky2's circuit, all hashes are 4 Goldilocks field elements (256 bits).
+ * This is stored as 32 bytes in serialized form.
  */
 
 import {
-  poseidonPQHash,
-  bytesToGoldilocks,
-  goldilocksToBytes,
-  DOMAIN_NOTE_COMMIT_PQ,
-  DOMAIN_VALUE_COMMIT_PQ,
-  DOMAIN_NULLIFIER_PQ,
+  noteCommitmentPQ as poseidonNoteCommitmentPQ,
+  valueCommitmentPQ as poseidonValueCommitmentPQ,
+  deriveNullifierPQ as poseidonDeriveNullifierPQ,
 } from './poseidon-pq';
 import { hexToBytes, bytesToHex } from './crypto';
 
@@ -44,17 +46,13 @@ export interface NoteCommitmentPQ {
  *
  * @param value - The value to commit to
  * @param randomness - 32 bytes of randomness
- * @returns The commitment
+ * @returns The commitment (32 bytes)
  */
 export function commitToValuePQ(value: bigint, randomness: Uint8Array): Uint8Array {
   if (randomness.length !== 32) {
     throw new Error('Randomness must be 32 bytes');
   }
-
-  const randomnessFe = bytesToGoldilocks(randomness);
-  const hash = poseidonPQHash([DOMAIN_VALUE_COMMIT_PQ, value, randomnessFe]);
-
-  return goldilocksToBytes(hash);
+  return poseidonValueCommitmentPQ(value, randomness);
 }
 
 /**
@@ -63,7 +61,7 @@ export function commitToValuePQ(value: bigint, randomness: Uint8Array): Uint8Arr
  * @param value - The note value
  * @param pkHash - Recipient public key hash (32 bytes)
  * @param randomness - Note randomness (32 bytes)
- * @returns The commitment
+ * @returns The commitment (32 bytes)
  */
 export function commitToNotePQ(
   value: bigint,
@@ -76,12 +74,7 @@ export function commitToNotePQ(
   if (randomness.length !== 32) {
     throw new Error('Randomness must be 32 bytes');
   }
-
-  const pkHashFe = bytesToGoldilocks(pkHash);
-  const randomnessFe = bytesToGoldilocks(randomness);
-  const hash = poseidonPQHash([DOMAIN_NOTE_COMMIT_PQ, value, pkHashFe, randomnessFe]);
-
-  return goldilocksToBytes(hash);
+  return poseidonNoteCommitmentPQ(value, pkHash, randomness);
 }
 
 /**
@@ -103,12 +96,7 @@ export function deriveNullifierPQ(
   if (commitment.length !== 32) {
     throw new Error('commitment must be 32 bytes');
   }
-
-  const nkFe = bytesToGoldilocks(nullifierKey);
-  const cmFe = bytesToGoldilocks(commitment);
-  const hash = poseidonPQHash([DOMAIN_NULLIFIER_PQ, nkFe, cmFe, position]);
-
-  return goldilocksToBytes(hash);
+  return poseidonDeriveNullifierPQ(nullifierKey, commitment, position);
 }
 
 /**

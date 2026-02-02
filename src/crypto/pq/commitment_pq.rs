@@ -11,12 +11,17 @@
 //!
 //! Unlike Pedersen commitments, hash-based commitments are NOT homomorphic.
 //! Balance verification must happen inside the ZK proof instead.
+//!
+//! ## Hash Format
+//!
+//! To match Plonky2's circuit, all hashes are 4 Goldilocks field elements (256 bits).
+//! This is stored as 32 bytes in serialized form.
 
 use serde::{Deserialize, Serialize};
 
 use super::poseidon_pq::{
-    poseidon_pq_hash, bytes_to_goldilocks, goldilocks_to_bytes, u64_to_goldilocks,
-    DOMAIN_NOTE_COMMIT_PQ, DOMAIN_VALUE_COMMIT_PQ, GoldilocksField,
+    poseidon_pq_hash, bytes_to_hash_out, hash_out_to_bytes, u64_to_goldilocks,
+    DOMAIN_NOTE_COMMIT_PQ, DOMAIN_VALUE_COMMIT_PQ,
 };
 
 /// A hash-based value commitment (post-quantum secure).
@@ -122,31 +127,42 @@ impl Default for NoteCommitmentPQ {
 /// Compute a value commitment using Poseidon hash.
 ///
 /// This is a standalone function for use in circuits and elsewhere.
+/// Input: domain (1) + value (1) + randomness (4) = 6 field elements
+/// Output: 4 field elements (32 bytes)
 pub fn commit_to_value_pq(value: u64, randomness: &[u8; 32]) -> [u8; 32] {
     let value_fe = u64_to_goldilocks(value);
-    let randomness_fe = bytes_to_goldilocks(randomness);
+    let randomness_elems = bytes_to_hash_out(randomness);
 
-    let hash = poseidon_pq_hash(&[DOMAIN_VALUE_COMMIT_PQ, value_fe, randomness_fe]);
+    let mut inputs = vec![DOMAIN_VALUE_COMMIT_PQ, value_fe];
+    inputs.extend_from_slice(&randomness_elems);
 
-    goldilocks_to_bytes(hash)
+    let hash = poseidon_pq_hash(&inputs);
+    hash_out_to_bytes(&hash)
 }
 
 /// Compute a note commitment using Poseidon hash.
 ///
 /// This is a standalone function for use in circuits and elsewhere.
+/// Input: domain (1) + value (1) + pk_hash (4) + randomness (4) = 10 field elements
+/// Output: 4 field elements (32 bytes)
 pub fn commit_to_note_pq(value: u64, recipient_pk_hash: &[u8; 32], randomness: &[u8; 32]) -> [u8; 32] {
     let value_fe = u64_to_goldilocks(value);
-    let pk_hash_fe = bytes_to_goldilocks(recipient_pk_hash);
-    let randomness_fe = bytes_to_goldilocks(randomness);
+    let pk_hash_elems = bytes_to_hash_out(recipient_pk_hash);
+    let randomness_elems = bytes_to_hash_out(randomness);
 
-    let hash = poseidon_pq_hash(&[DOMAIN_NOTE_COMMIT_PQ, value_fe, pk_hash_fe, randomness_fe]);
+    let mut inputs = vec![DOMAIN_NOTE_COMMIT_PQ, value_fe];
+    inputs.extend_from_slice(&pk_hash_elems);
+    inputs.extend_from_slice(&randomness_elems);
 
-    goldilocks_to_bytes(hash)
+    let hash = poseidon_pq_hash(&inputs);
+    hash_out_to_bytes(&hash)
 }
 
 /// Derive a nullifier for a note (post-quantum version).
 ///
 /// nullifier = Poseidon(DOMAIN_NULLIFIER_PQ, nullifier_key, commitment, position)
+/// Input: domain (1) + nullifier_key (4) + commitment (4) + position (1) = 10 field elements
+/// Output: 4 field elements (32 bytes)
 pub fn derive_nullifier_pq(
     nullifier_key: &[u8; 32],
     commitment: &[u8; 32],
@@ -154,13 +170,17 @@ pub fn derive_nullifier_pq(
 ) -> [u8; 32] {
     use super::poseidon_pq::DOMAIN_NULLIFIER_PQ;
 
-    let nk_fe = bytes_to_goldilocks(nullifier_key);
-    let cm_fe = bytes_to_goldilocks(commitment);
+    let nk_elems = bytes_to_hash_out(nullifier_key);
+    let cm_elems = bytes_to_hash_out(commitment);
     let pos_fe = u64_to_goldilocks(position);
 
-    let hash = poseidon_pq_hash(&[DOMAIN_NULLIFIER_PQ, nk_fe, cm_fe, pos_fe]);
+    let mut inputs = vec![DOMAIN_NULLIFIER_PQ];
+    inputs.extend_from_slice(&nk_elems);
+    inputs.extend_from_slice(&cm_elems);
+    inputs.push(pos_fe);
 
-    goldilocks_to_bytes(hash)
+    let hash = poseidon_pq_hash(&inputs);
+    hash_out_to_bytes(&hash)
 }
 
 /// Helper module for hex serialization of 32-byte arrays.

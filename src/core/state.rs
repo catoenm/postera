@@ -200,16 +200,19 @@ impl ShieldedState {
     ///
     /// This:
     /// 1. Adds all nullifiers to the spent set
-    /// 2. Adds all output commitments to the tree
+    /// 2. Adds all output commitments to both V1 and V2 trees
     pub fn apply_transaction(&mut self, tx: &ShieldedTransaction) {
         // Add nullifiers to spent set
         for spend in &tx.spends {
             self.nullifier_set.insert(spend.nullifier);
         }
 
-        // Add output commitments to tree
+        // Add output commitments to both trees
         for output in &tx.outputs {
             self.commitment_tree.append(&output.note_commitment);
+            // Also add to V2 tree for quantum-resistant proofs
+            let cm_pq = NoteCommitmentPQ::from(output.note_commitment.to_bytes());
+            self.commitment_tree_pq.append(&cm_pq);
         }
     }
 
@@ -225,9 +228,12 @@ impl ShieldedState {
     }
 
     /// Apply a coinbase transaction.
-    /// Adds the reward note commitment to the tree.
+    /// Adds the reward note commitment to both V1 and V2 trees.
     pub fn apply_coinbase(&mut self, coinbase: &CoinbaseTransaction) {
         self.commitment_tree.append(&coinbase.note_commitment);
+        // Use the proper V2/PQ commitment (computed with Goldilocks Poseidon)
+        let cm_pq = NoteCommitmentPQ::from(coinbase.note_commitment_pq);
+        self.commitment_tree_pq.append(&cm_pq);
     }
 
     /// Validate a coinbase transaction.
@@ -291,43 +297,120 @@ impl ShieldedState {
             tx.outputs.len(),
         ).map_err(|_| StateError::InvalidProof)?;
 
+        tracing::debug!(
+            "verify_proof succeeded. public_inputs: nullifiers={}, commitments={}, merkle_roots={}, fee={}",
+            public_inputs.nullifiers.len(),
+            public_inputs.note_commitments.len(),
+            public_inputs.merkle_roots.len(),
+            public_inputs.fee
+        );
+        tracing::debug!(
+            "Transaction: spends={}, outputs={}, fee={}",
+            tx.spends.len(),
+            tx.outputs.len(),
+            tx.fee
+        );
+
         // 2. Validate public inputs match transaction
         if public_inputs.nullifiers.len() != tx.spends.len() {
+            tracing::warn!(
+                "Nullifier count mismatch: proof has {}, tx has {}",
+                public_inputs.nullifiers.len(),
+                tx.spends.len()
+            );
             return Err(StateError::InvalidProof);
         }
         if public_inputs.note_commitments.len() != tx.outputs.len() {
+            tracing::warn!(
+                "Note commitment count mismatch: proof has {}, tx has {}",
+                public_inputs.note_commitments.len(),
+                tx.outputs.len()
+            );
             return Err(StateError::InvalidProof);
         }
         if public_inputs.fee != tx.fee {
+            tracing::warn!(
+                "Fee mismatch: proof has {}, tx has {}",
+                public_inputs.fee,
+                tx.fee
+            );
             return Err(StateError::InvalidProof);
         }
 
-        // 3. Validate anchors
+        // 3. Validate anchors (using V2/PQ tree)
         for (i, root) in public_inputs.merkle_roots.iter().enumerate() {
-            if !self.is_valid_anchor(root) {
+            tracing::debug!(
+                "Checking anchor {}: proof_root={}, tx_anchor={}",
+                i,
+                hex::encode(root),
+                hex::encode(&tx.spends[i].anchor)
+            );
+            if !self.is_valid_anchor_pq(root) {
+                tracing::warn!(
+                    "V2 anchor validation failed for spend {}: anchor={}, recent_roots_count={}",
+                    i,
+                    hex::encode(root),
+                    self.commitment_tree_pq.recent_roots().len()
+                );
+                // Log first and last recent roots for comparison
+                let recent = self.commitment_tree_pq.recent_roots();
+                if !recent.is_empty() {
+                    tracing::warn!("  First recent root: {}", hex::encode(recent.front().unwrap()));
+                    tracing::warn!("  Last recent root:  {}", hex::encode(recent.back().unwrap()));
+                }
                 return Err(StateError::InvalidAnchor);
             }
             // Verify proof root matches spend anchor
             if root != &tx.spends[i].anchor {
+                tracing::warn!(
+                    "Anchor mismatch for spend {}: proof_root={}, tx_anchor={}",
+                    i,
+                    hex::encode(root),
+                    hex::encode(&tx.spends[i].anchor)
+                );
                 return Err(StateError::InvalidAnchor);
             }
         }
 
         // 4. Check nullifiers not already spent
         for (i, nf) in public_inputs.nullifiers.iter().enumerate() {
+            tracing::debug!(
+                "Checking nullifier {}: proof_nf={}, tx_nf={}",
+                i,
+                hex::encode(nf),
+                hex::encode(&tx.spends[i].nullifier)
+            );
             let nullifier = Nullifier(*nf);
             if self.is_nullifier_spent(&nullifier) {
                 return Err(StateError::NullifierAlreadySpent(nullifier));
             }
             // Verify proof nullifier matches spend nullifier
             if nf != &tx.spends[i].nullifier {
+                tracing::warn!(
+                    "Nullifier mismatch for spend {}: proof_nf={}, tx_nf={}",
+                    i,
+                    hex::encode(nf),
+                    hex::encode(&tx.spends[i].nullifier)
+                );
                 return Err(StateError::InvalidProof);
             }
         }
 
         // 5. Verify note commitments match
         for (i, cm) in public_inputs.note_commitments.iter().enumerate() {
+            tracing::debug!(
+                "Checking note_commitment {}: proof_cm={}, tx_cm={}",
+                i,
+                hex::encode(cm),
+                hex::encode(&tx.outputs[i].note_commitment)
+            );
             if cm != &tx.outputs[i].note_commitment {
+                tracing::warn!(
+                    "Note commitment mismatch for output {}: proof_cm={}, tx_cm={}",
+                    i,
+                    hex::encode(cm),
+                    hex::encode(&tx.outputs[i].note_commitment)
+                );
                 return Err(StateError::InvalidProof);
             }
         }
@@ -358,8 +441,8 @@ impl ShieldedState {
 
         // Validate all spends
         for spend in &tx.spends {
-            // Check anchor is valid
-            if !self.is_valid_anchor(&spend.anchor) {
+            // Check anchor is valid (using V2/PQ tree)
+            if !self.is_valid_anchor_pq(&spend.anchor) {
                 return Err(StateError::InvalidAnchor);
             }
 
@@ -382,11 +465,13 @@ impl ShieldedState {
             self.nullifier_set.insert(Nullifier(spend.nullifier));
         }
 
-        // Add output commitments to tree
-        // Note: V2 uses different commitment format, but tree stores 32-byte hashes
+        // Add output commitments to both V1 and V2 trees
         for output in &tx.outputs {
             let cm = NoteCommitment(output.note_commitment);
             self.commitment_tree.append(&cm);
+            // Also add to V2 tree for quantum-resistant proofs
+            let cm_pq = NoteCommitmentPQ::from(output.note_commitment);
+            self.commitment_tree_pq.append(&cm_pq);
         }
     }
 
@@ -472,10 +557,13 @@ impl ShieldedState {
             self.nullifier_set.insert(spend.nullifier);
         }
 
-        // Add V2 output commitments to tree
+        // Add V2 output commitments to both trees
         for output in &tx.pq_outputs {
             let cm = NoteCommitment(output.note_commitment);
             self.commitment_tree.append(&cm);
+            // Also add to V2 tree for quantum-resistant proofs
+            let cm_pq = NoteCommitmentPQ::from(output.note_commitment);
+            self.commitment_tree_pq.append(&cm_pq);
         }
     }
 

@@ -17,6 +17,7 @@ import { hexToBytes, bytesToHex } from './crypto';
 import { getOutputsSince, checkNullifiers } from './api';
 import { loadProvingKeys, areProvingKeysLoaded } from './prover';
 import { initBindingCrypto, isBindingCryptoReady } from './binding';
+import { deriveNullifierPQ } from './commitment-pq';
 import type { WalletNote, ShieldedState, EncryptedOutput } from './types';
 
 /** Whether cryptographic primitives have been initialized */
@@ -191,6 +192,13 @@ export class ShieldedWallet {
             newNotesFound++;
             onProgress?.(`Found note: ${this.formatValue(note.value)} PSTR at height ${note.blockHeight}`);
           }
+
+          // Also create V2 note if this is a V2 wallet and V2/PQ commitment is available
+          this.maybeAddV2Note(output, note);
+        } else {
+          // If V1 decryption failed but there's a V2 commitment, try V2-only processing
+          // This handles pure V2 outputs that don't have a V1 commitment
+          this.maybeAddV2OnlyNote(output);
         }
       }
 
@@ -216,6 +224,12 @@ export class ShieldedWallet {
    * Returns a WalletNote if successful, null otherwise.
    */
   private tryDecryptOutput(output: EncryptedOutput): WalletNote | null {
+    // Skip V2-only outputs that don't have a V1 commitment
+    // (they can only be processed by the V2 wallet via maybeAddV2Note)
+    if (!output.note_commitment || output.note_commitment.length === 0) {
+      return null;
+    }
+
     const decrypted = tryDecryptNoteFromHex(
       output.ciphertext,
       output.ephemeral_pk,
@@ -252,6 +266,22 @@ export class ShieldedWallet {
       spent: false,
       nullifier: bytesToHex(nullifier),
     };
+  }
+
+  /**
+   * Hook for subclasses to add V2 notes when scanning.
+   * Default implementation does nothing.
+   */
+  protected maybeAddV2Note(_output: EncryptedOutput, _note: WalletNote): void {
+    // Base class does nothing - V2 wallet overrides this
+  }
+
+  /**
+   * Hook for subclasses to process V2-only outputs (no V1 commitment).
+   * Default implementation does nothing.
+   */
+  protected maybeAddV2OnlyNote(_output: EncryptedOutput): void {
+    // Base class does nothing - V2 wallet overrides this
   }
 
   /**
@@ -598,6 +628,92 @@ export class ShieldedWalletV2 extends ShieldedWallet {
   }
 
   /**
+   * Override to also create V2 notes when scanning.
+   */
+  protected override maybeAddV2Note(output: EncryptedOutput, note: WalletNote): void {
+    // Only process if V2/PQ commitment is available
+    if (!output.note_commitment_pq || output.note_commitment_pq.length === 0) {
+      return;
+    }
+
+    // Check if we already have this V2 note
+    const existing = this.v2Notes.find((n) => n.commitment === output.note_commitment_pq);
+    if (existing) {
+      return;
+    }
+
+    // Derive V2 nullifier using the V2/PQ commitment
+    const commitmentPqBytes = hexToBytes(output.note_commitment_pq);
+    const nullifierPq = deriveNullifierPQ(this.nullifierKey, commitmentPqBytes, BigInt(output.position));
+
+    this.v2Notes.push({
+      value: note.value,
+      recipientPkHash: note.recipientPkHash,
+      randomness: note.randomness,
+      commitment: output.note_commitment_pq,  // Use V2/PQ commitment
+      position: BigInt(output.position),
+      blockHeight: output.block_height,
+      spent: false,
+      nullifier: bytesToHex(nullifierPq),
+      version: 2,
+    });
+
+    this.saveV2State();
+  }
+
+  /**
+   * Process V2-only outputs (no V1 commitment).
+   * These come from pure V2 transactions.
+   */
+  protected override maybeAddV2OnlyNote(output: EncryptedOutput): void {
+    // Only process if V2/PQ commitment is available
+    if (!output.note_commitment_pq || output.note_commitment_pq.length === 0) {
+      return;
+    }
+
+    // Try to decrypt the note
+    const decrypted = tryDecryptNoteFromHex(
+      output.ciphertext,
+      output.ephemeral_pk,
+      this.pkHash
+    );
+
+    if (!decrypted) {
+      return;
+    }
+
+    // Verify the note is for our pk_hash
+    const recipientPkHashHex = bytesToHex(decrypted.recipientPkHash);
+    if (recipientPkHashHex !== this.pkHashHex) {
+      return;
+    }
+
+    // Check if we already have this V2 note
+    const existing = this.v2Notes.find((n) => n.commitment === output.note_commitment_pq);
+    if (existing) {
+      return;
+    }
+
+    // Derive V2 nullifier using the V2/PQ commitment
+    const commitmentPqBytes = hexToBytes(output.note_commitment_pq);
+    const nullifierPq = deriveNullifierPQ(this.nullifierKey, commitmentPqBytes, BigInt(output.position));
+
+    this.v2Notes.push({
+      value: decrypted.value,
+      recipientPkHash: recipientPkHashHex,
+      randomness: bytesToHex(decrypted.randomness),
+      commitment: output.note_commitment_pq,
+      position: BigInt(output.position),
+      blockHeight: output.block_height,
+      spent: false,
+      nullifier: bytesToHex(nullifierPq),
+      version: 2,
+    });
+
+    this.saveV2State();
+  }
+
+  /**
    * Mark V2 notes as spent.
    */
   markV2NotesSpent(nullifiers: string[]): void {
@@ -608,6 +724,42 @@ export class ShieldedWalletV2 extends ShieldedWallet {
       }
     }
     this.saveV2State();
+  }
+
+  /**
+   * Check which V2 notes have been spent.
+   */
+  async checkSpentV2(): Promise<void> {
+    const unspentV2Notes = this.v2Notes.filter((n) => !n.spent && n.nullifier);
+
+    if (unspentV2Notes.length === 0) {
+      return;
+    }
+
+    const nullifiers = unspentV2Notes.map((n) => n.nullifier!);
+    const response = await checkNullifiers(nullifiers);
+
+    for (const spentNf of response.spent) {
+      const note = this.v2Notes.find((n) => n.nullifier === spentNf);
+      if (note) {
+        note.spent = true;
+      }
+    }
+
+    this.saveV2State();
+  }
+
+  /**
+   * Override scan to also check V2 spent status.
+   */
+  override async scan(onProgress?: (msg: string) => void): Promise<number> {
+    const result = await super.scan(onProgress);
+
+    // Also check V2 nullifiers for spent status
+    onProgress?.('Checking V2 spent notes...');
+    await this.checkSpentV2();
+
+    return result;
   }
 
   /**

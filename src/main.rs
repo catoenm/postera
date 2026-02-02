@@ -530,16 +530,21 @@ async fn cmd_node(
             }
 
             loop {
-                // Get mempool transactions
-                let mempool_txs = {
+                // Get mempool transactions (both V1 and V2)
+                let (mempool_txs, mempool_txs_v2) = {
                     let mempool = mine_state.mempool.read().unwrap();
-                    mempool.get_transactions(100)
+                    let v1 = mempool.get_transactions(100);
+                    let v2 = mempool.get_shielded_v2_transactions(100);
+                    if !v2.is_empty() {
+                        println!("  Including {} V2 transactions in block template", v2.len());
+                    }
+                    (v1, v2)
                 };
 
-                // Create block template
+                // Create block template with both V1 and V2 transactions
                 let mut block = {
                     let chain = mine_state.blockchain.read().unwrap();
-                    chain.create_block_template(miner_pk_hash, &viewing_key, mempool_txs)
+                    chain.create_block_template_with_v2(miner_pk_hash, &viewing_key, mempool_txs, mempool_txs_v2)
                 };
 
                 let (height, difficulty) = {
@@ -547,7 +552,12 @@ async fn cmd_node(
                     (chain.height() + 1, block.header.difficulty)
                 };
 
-                println!("Mining block {} (difficulty: {})...", height, difficulty);
+                let v2_count = block.transactions_v2.len();
+                if v2_count > 0 {
+                    println!("Mining block {} (difficulty: {}, V2 txs: {})...", height, difficulty, v2_count);
+                } else {
+                    println!("Mining block {} (difficulty: {})...", height, difficulty);
+                }
 
                 // Mine in a blocking task to not block the async runtime
                 let mine_state_for_stats = mine_state.clone();
@@ -588,18 +598,20 @@ async fn cmd_node(
                                 &mined_block.hash_hex()[..16]
                             );
 
-                            // Remove mined transactions from mempool
-                            let tx_hashes: Vec<[u8; 32]> = mined_block
+                            // Remove mined transactions from mempool (both V1 and V2)
+                            let mut tx_hashes: Vec<[u8; 32]> = mined_block
                                 .transactions
                                 .iter()
                                 .map(|tx| tx.hash())
                                 .collect();
+                            tx_hashes.extend(mined_block.transactions_v2.iter().map(|tx| tx.hash()));
 
                             let mut mempool = mine_state.mempool.write().unwrap();
                             mempool.remove_confirmed(&tx_hashes);
 
-                            // Remove transactions with spent nullifiers
-                            let nullifiers: Vec<[u8; 32]> = mined_block.nullifiers().iter().map(|n| n.0).collect();
+                            // Remove transactions with spent nullifiers (both V1 and V2)
+                            let mut nullifiers: Vec<[u8; 32]> = mined_block.nullifiers().iter().map(|n| n.0).collect();
+                            nullifiers.extend(mined_block.transactions_v2.iter().flat_map(|tx| tx.spends.iter().map(|s| s.nullifier)));
                             mempool.remove_spent_nullifiers(&nullifiers);
 
                             // Re-validate remaining mempool transactions

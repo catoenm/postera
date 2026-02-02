@@ -48,6 +48,10 @@ export default defineConfig({
       '/chain': 'http://localhost:8333',
       '/block': 'http://localhost:8333',
       '/mempool': 'http://localhost:8333',
+      '/miner': 'http://localhost:8333',
+      '/blocks': 'http://localhost:8333',
+      '/peers': 'http://localhost:8333',
+      '/debug': 'http://localhost:8333',
       // Shielded wallet API endpoints
       '/outputs': 'http://localhost:8333',
       '/witness': 'http://localhost:8333',

@@ -2,6 +2,11 @@
 //!
 //! This provides the same functionality as the V1 Merkle tree but uses
 //! quantum-resistant hash functions.
+//!
+//! ## Hash Format
+//!
+//! To match Plonky2's circuit, hashes are 4 Goldilocks field elements (256 bits).
+//! This is stored as 32 bytes in serialized form.
 
 use std::collections::VecDeque;
 
@@ -9,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use super::commitment_pq::NoteCommitmentPQ;
 use super::poseidon_pq::{
-    poseidon_pq_hash, bytes_to_goldilocks, goldilocks_to_bytes,
-    DOMAIN_MERKLE_EMPTY_PQ, DOMAIN_MERKLE_NODE_PQ, GoldilocksField,
+    poseidon_pq_hash, bytes_to_hash_out, hash_out_to_bytes,
+    DOMAIN_MERKLE_EMPTY_PQ, DOMAIN_MERKLE_NODE_PQ, GoldilocksField, HashOut,
 };
 
 /// Depth of the Merkle tree (same as V1 for compatibility).
@@ -19,30 +24,40 @@ pub const TREE_DEPTH_PQ: usize = 32;
 /// Number of recent roots to keep for anchor validation.
 const RECENT_ROOTS_COUNT: usize = 100;
 
-/// Hash type for tree nodes.
+/// Hash type for tree nodes (4 field elements = 256 bits = 32 bytes).
 pub type TreeHashPQ = [u8; 32];
+
+/// Internal hash representation (4 field elements).
+type InternalHash = HashOut;
 
 /// Compute the empty tree hash at a given depth.
 /// This is cached for efficiency.
-fn empty_hash_at_depth(depth: usize) -> GoldilocksField {
+fn empty_hash_at_depth(depth: usize) -> InternalHash {
     if depth == 0 {
         // Leaf level: hash of empty commitment
         poseidon_pq_hash(&[DOMAIN_MERKLE_EMPTY_PQ])
     } else {
         // Internal node: hash of two empty children
         let child = empty_hash_at_depth(depth - 1);
-        poseidon_pq_hash(&[DOMAIN_MERKLE_NODE_PQ, child, child])
+        // Build input: [domain, left[4], right[4]] = 9 elements
+        let mut inputs = vec![DOMAIN_MERKLE_NODE_PQ];
+        inputs.extend_from_slice(&child);
+        inputs.extend_from_slice(&child);
+        poseidon_pq_hash(&inputs)
     }
 }
 
 /// Compute the root of an empty tree.
 pub fn empty_root_pq() -> TreeHashPQ {
-    goldilocks_to_bytes(empty_hash_at_depth(TREE_DEPTH_PQ))
+    hash_out_to_bytes(&empty_hash_at_depth(TREE_DEPTH_PQ))
 }
 
-/// Compute a node hash from two children.
-fn hash_node(left: GoldilocksField, right: GoldilocksField) -> GoldilocksField {
-    poseidon_pq_hash(&[DOMAIN_MERKLE_NODE_PQ, left, right])
+/// Compute a node hash from two children (each 4 field elements).
+fn hash_node(left: &InternalHash, right: &InternalHash) -> InternalHash {
+    let mut inputs = vec![DOMAIN_MERKLE_NODE_PQ];
+    inputs.extend_from_slice(left);
+    inputs.extend_from_slice(right);
+    poseidon_pq_hash(&inputs)
 }
 
 /// A Merkle path proving membership.
@@ -61,18 +76,18 @@ impl MerklePathPQ {
             return false;
         }
 
-        let mut current = bytes_to_goldilocks(leaf);
+        let mut current = bytes_to_hash_out(leaf);
 
         for (sibling, &index) in self.siblings.iter().zip(self.indices.iter()) {
-            let sibling_fe = bytes_to_goldilocks(sibling);
+            let sibling_hash = bytes_to_hash_out(sibling);
             current = if index == 0 {
-                hash_node(current, sibling_fe)
+                hash_node(&current, &sibling_hash)
             } else {
-                hash_node(sibling_fe, current)
+                hash_node(&sibling_hash, &current)
             };
         }
 
-        goldilocks_to_bytes(current) == *root
+        hash_out_to_bytes(&current) == *root
     }
 
     /// Get the path depth.
@@ -105,26 +120,33 @@ impl MerkleWitnessPQ {
 /// - Leaves are added left-to-right
 /// - Only the frontier (rightmost path) is stored in memory
 /// - Recent roots are cached for anchor validation
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CommitmentTreePQ {
     /// Number of leaves in the tree.
     size: u64,
     /// Frontier: hashes at each level on the rightmost path.
     /// frontier[0] is the most recent leaf, frontier[31] is the root.
-    frontier: Vec<GoldilocksField>,
+    frontier: Vec<InternalHash>,
     /// Recent roots for anchor validation.
     recent_roots: VecDeque<TreeHashPQ>,
     /// All leaves (for witness generation in testing/local mode).
     /// In production, this would be stored externally.
-    leaves: Vec<GoldilocksField>,
+    leaves: Vec<InternalHash>,
+}
+
+impl Default for CommitmentTreePQ {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CommitmentTreePQ {
     /// Create a new empty commitment tree.
     pub fn new() -> Self {
+        let zero_hash = [GoldilocksField::ZERO; 4];
         let mut tree = Self {
             size: 0,
-            frontier: vec![GoldilocksField::new(0); TREE_DEPTH_PQ],
+            frontier: vec![zero_hash; TREE_DEPTH_PQ],
             recent_roots: VecDeque::with_capacity(RECENT_ROOTS_COUNT),
             leaves: Vec::new(),
         };
@@ -142,23 +164,42 @@ impl CommitmentTreePQ {
             return empty_root_pq();
         }
 
-        // Compute root from frontier
-        let mut current = self.frontier[0];
-        let mut position = self.size - 1;
+        // Compute root from stored leaves (consistent with get_path)
+        // This is O(n log n) but correct. The frontier-based approach was buggy.
+        let mut level: Vec<InternalHash> = self.leaves.clone();
 
-        for depth in 0..TREE_DEPTH_PQ {
-            let empty = empty_hash_at_depth(depth);
-            if position & 1 == 0 {
-                // We're on the left, sibling is empty
-                current = hash_node(current, empty);
-            } else {
-                // We're on the right, use frontier
-                current = hash_node(self.frontier[depth], current);
-            }
-            position >>= 1;
+        // Pad to next power of 2
+        let next_pow2 = (self.size as usize).next_power_of_two().max(2);
+        while level.len() < next_pow2 {
+            level.push(empty_hash_at_depth(0));
         }
 
-        goldilocks_to_bytes(current)
+        // Build tree levels until we reach the partial root
+        let mut depth = 0;
+        while level.len() > 1 {
+            let mut next_level = Vec::with_capacity(level.len() / 2 + 1);
+            for chunk in level.chunks(2) {
+                let left = &chunk[0];
+                let right = if chunk.len() > 1 {
+                    &chunk[1]
+                } else {
+                    &empty_hash_at_depth(depth)
+                };
+                next_level.push(hash_node(left, right));
+            }
+            level = next_level;
+            depth += 1;
+        }
+
+        // We now have the partial root (for next_pow2 leaves)
+        // Continue hashing with empty siblings up to TREE_DEPTH_PQ
+        let mut current = level[0];
+        while depth < TREE_DEPTH_PQ {
+            current = hash_node(&current, &empty_hash_at_depth(depth));
+            depth += 1;
+        }
+
+        hash_out_to_bytes(&current)
     }
 
     /// Get the empty root (for comparison).
@@ -183,7 +224,7 @@ impl CommitmentTreePQ {
 
     /// Append a commitment to the tree.
     pub fn append(&mut self, commitment: &NoteCommitmentPQ) {
-        let leaf = bytes_to_goldilocks(&commitment.to_bytes());
+        let leaf = bytes_to_hash_out(&commitment.to_bytes());
         self.leaves.push(leaf);
 
         let mut current = leaf;
@@ -196,7 +237,7 @@ impl CommitmentTreePQ {
                 break;
             } else {
                 // This is a right child - hash with frontier
-                current = hash_node(self.frontier[depth], current);
+                current = hash_node(&self.frontier[depth], &current);
             }
             position >>= 1;
         }
@@ -222,13 +263,12 @@ impl CommitmentTreePQ {
         let mut pos = position;
 
         // Build path from stored leaves
-        // This is O(n) but works for testing. Production would use a database.
-        let mut level: Vec<GoldilocksField> = self.leaves.clone();
+        // This is O(n log n) but works for small trees. Production would use a database.
+        let mut level: Vec<InternalHash> = self.leaves.clone();
 
-        // Pad to next power of 2 with empty leaves
-        let target_size = 1u64 << TREE_DEPTH_PQ;
-        while (level.len() as u64) < target_size && level.len() < (1 << 20) {
-            // Limit padding for memory
+        // Pad to next power of 2 (only what we need, not the full tree)
+        let next_pow2 = (self.size as usize).next_power_of_two().max(2);
+        while level.len() < next_pow2 {
             level.push(empty_hash_at_depth(0));
         }
 
@@ -241,17 +281,26 @@ impl CommitmentTreePQ {
                 empty_hash_at_depth(depth)
             };
 
-            siblings.push(goldilocks_to_bytes(sibling));
+            siblings.push(hash_out_to_bytes(&sibling));
             indices.push((pos & 1) as u8);
 
             // Move up the tree
+            if level.len() <= 1 {
+                // We've reached the root, fill remaining with empty siblings
+                for d in (depth + 1)..TREE_DEPTH_PQ {
+                    siblings.push(hash_out_to_bytes(&empty_hash_at_depth(d)));
+                    indices.push(0);
+                }
+                break;
+            }
+
             let mut next_level = Vec::with_capacity(level.len() / 2 + 1);
             for chunk in level.chunks(2) {
-                let left = chunk[0];
+                let left = &chunk[0];
                 let right = if chunk.len() > 1 {
-                    chunk[1]
+                    &chunk[1]
                 } else {
-                    empty_hash_at_depth(depth)
+                    &empty_hash_at_depth(depth)
                 };
                 next_level.push(hash_node(left, right));
             }
@@ -372,7 +421,7 @@ mod tests {
             let cm = NoteCommitmentPQ::from_bytes(bytes);
 
             let witness = tree.witness(i).expect("Should have witness");
-            assert!(witness.verify(&cm));
+            assert!(witness.verify(&cm), "Position {} failed verification", i);
         }
     }
 }

@@ -9,7 +9,7 @@ import {
   MLDSA65_SK_SIZE,
 } from './crypto';
 import { computePkHash } from './shielded-crypto';
-import { ShieldedWallet } from './shielded-wallet';
+import { ShieldedWallet, ShieldedWalletV2 } from './shielded-wallet';
 import {
   createShieldedTransactionV2,
   validateTransactionParams,
@@ -26,7 +26,7 @@ export default function Wallet() {
   const [view, setView] = useState<'wallet' | 'send' | 'receive' | 'sign'>('wallet');
 
   // Shielded wallet state
-  const [shieldedWallet, setShieldedWallet] = useState<ShieldedWallet | null>(null);
+  const [shieldedWallet, setShieldedWallet] = useState<ShieldedWalletV2 | null>(null);
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState<string>('');
   const [balance, setBalance] = useState<string>('0');
@@ -71,7 +71,7 @@ export default function Wallet() {
         // Initialize Poseidon hash before creating wallet (required for nullifier derivation)
         await ShieldedWallet.initialize(false, (msg) => setScanStatus(msg));
 
-        const sw = ShieldedWallet.fromHex(wallet.secret_key, wallet.public_key);
+        const sw = ShieldedWalletV2.fromHexV2(wallet.secret_key, wallet.public_key);
         setShieldedWallet(sw);
         updateBalanceDisplay(sw);
       };
@@ -79,11 +79,12 @@ export default function Wallet() {
     }
   }, [wallet]);
 
-  // Update balance display from shielded wallet
-  const updateBalanceDisplay = useCallback((sw: ShieldedWallet) => {
-    const summary = sw.getSummary();
-    setBalance(summary.balance);
-    setUnspentCount(summary.unspentCount);
+  // Update balance display from shielded wallet (V2 enabled)
+  const updateBalanceDisplay = useCallback((sw: ShieldedWalletV2) => {
+    const summary = sw.getExtendedSummary();
+    // Show V2 balance since we send V2 transactions
+    setBalance(summary.v2Balance);
+    setUnspentCount(summary.v2UnspentCount);
   }, []);
 
   // Scan for notes
@@ -181,6 +182,7 @@ export default function Wallet() {
     if (confirm('Are you sure you want to logout? Make sure you have backed up your keys!')) {
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem('postera_shielded_state');
+      localStorage.removeItem('postera_shielded_state_v2');
       setWallet(null);
       setShieldedWallet(null);
     }
@@ -234,8 +236,8 @@ export default function Wallet() {
         throw new Error('Recipient pk_hash must be 64 hex characters');
       }
 
-      // Select notes
-      const notesToSpend = shieldedWallet.selectNotes(amount + fee);
+      // Select V2 (post-quantum) notes
+      const notesToSpend = shieldedWallet.selectV2Notes(amount + fee);
 
       // Validate
       const validationError = validateTransactionParams({

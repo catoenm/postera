@@ -387,20 +387,48 @@ pub fn verify_proof(
     num_spends: usize,
     num_outputs: usize,
 ) -> Result<TransactionPublicInputs, ProofError> {
+    tracing::debug!(
+        "Verifying proof: {} spends, {} outputs, proof_bytes_len={}",
+        num_spends,
+        num_outputs,
+        proof.proof_bytes.len()
+    );
+
     // Build circuit for this shape to get verifier data
     let circuit = TransactionCircuit::new(num_spends, num_outputs);
     let (circuit_data, _) = circuit.build();
 
+    tracing::debug!(
+        "Circuit built: num_public_inputs={}",
+        circuit_data.common.num_public_inputs
+    );
+
     // Deserialize proof
     let plonky2_proof: ProofWithPublicInputs<F, C, D> =
         ProofWithPublicInputs::from_bytes(proof.proof_bytes.clone(), &circuit_data.common)
-            .map_err(|e| ProofError::SerializationError(e.to_string()))?;
+            .map_err(|e| {
+                tracing::warn!("Proof deserialization failed: {}", e);
+                ProofError::SerializationError(e.to_string())
+            })?;
+
+    tracing::debug!(
+        "Proof deserialized: {} public inputs",
+        plonky2_proof.public_inputs.len()
+    );
+
+    // Log public inputs from proof for debugging
+    tracing::debug!("Public inputs from proof: {:?}", plonky2_proof.public_inputs.iter().take(5).map(|f| f.to_canonical_u64()).collect::<Vec<_>>());
 
     // Verify
-    circuit_data
-        .verify(plonky2_proof)
-        .map_err(|e| ProofError::VerificationFailed(e.to_string()))?;
+    tracing::debug!("Starting circuit verification...");
+    let verify_result = circuit_data.verify(plonky2_proof.clone());
+    match &verify_result {
+        Ok(_) => tracing::debug!("Circuit verification PASSED"),
+        Err(e) => tracing::warn!("Circuit verification FAILED: {}", e),
+    }
+    verify_result.map_err(|e| ProofError::VerificationFailed(e.to_string()))?;
 
+    tracing::debug!("Returning public inputs from proof struct");
     Ok(proof.public_inputs.clone())
 }
 

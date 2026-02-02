@@ -230,6 +230,7 @@ mod tests {
     fn dummy_coinbase(height: u64) -> CoinbaseTransaction {
         CoinbaseTransaction::new(
             NoteCommitment([1u8; 32]),
+            [1u8; 32], // V2/PQ commitment (dummy for tests)
             EncryptedNote {
                 ciphertext: vec![0; 64],
                 ephemeral_pk: vec![0; 32],

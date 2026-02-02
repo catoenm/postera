@@ -136,6 +136,20 @@ impl Mempool {
         txs
     }
 
+    /// Get only ShieldedTransactionV2 transactions for mining.
+    pub fn get_shielded_v2_transactions(&self, limit: usize) -> Vec<crate::core::ShieldedTransactionV2> {
+        use crate::core::Transaction as TxEnum;
+        let mut txs: Vec<_> = self.v2_transactions.values()
+            .filter_map(|tx| match tx {
+                TxEnum::V2(v2) => Some(v2.clone()),
+                _ => None,
+            })
+            .collect();
+        txs.sort_by(|a, b| b.fee.cmp(&a.fee));
+        txs.truncate(limit);
+        txs
+    }
+
     /// Number of transactions in the mempool.
     pub fn len(&self) -> usize {
         self.v1_transactions.len() + self.v2_transactions.len()
