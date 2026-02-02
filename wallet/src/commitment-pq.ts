@@ -27,6 +27,7 @@
  */
 
 import { hexToBytes, bytesToHex } from './crypto';
+import { valueCommitmentPQ as valueCommitmentPQFallback } from './poseidon-pq';
 
 // WASM module functions - loaded dynamically
 let wasmInitialized = false;
@@ -158,9 +159,7 @@ export function commitToValuePQ(value: bigint, randomness: Uint8Array): Uint8Arr
   // Value commitments use the same structure as note commitments
   // but without the pk_hash. For now, we use the TypeScript implementation
   // since value commitments are not used in V2 proofs.
-  // TODO: Add WASM function if needed
-  const { valueCommitmentPQ } = require('./poseidon-pq');
-  return valueCommitmentPQ(value, randomness);
+  return valueCommitmentPQFallback(value, randomness);
 }
 
 /**

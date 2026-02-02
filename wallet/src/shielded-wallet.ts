@@ -823,15 +823,12 @@ export class ShieldedWalletV2 extends ShieldedWallet {
    * to recompute nullifiers for existing V2 notes.
    */
   async rescanV2Notes(onProgress?: (msg: string) => void): Promise<number> {
-    onProgress?.('Clearing V2 state...');
-    this.clearV2State();
+    onProgress?.('Clearing all state for full rescan...');
 
-    // Reset last scanned height to force full rescan
-    const originalHeight = this.lastScannedHeight;
-    this.lastScannedHeight = -1;
-    this.saveState();
+    // Clear all state (V1 + V2) to force full rescan
+    this.clearState();
 
-    onProgress?.('Rescanning blockchain for V2 notes...');
+    onProgress?.('Rescanning blockchain for all notes...');
     const notesFound = await this.scan(onProgress);
 
     onProgress?.(`Rescan complete. Found ${this.v2Notes.length} V2 notes.`);

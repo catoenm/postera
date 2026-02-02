@@ -45,15 +45,22 @@ const DOMAIN_MERKLE_NODE: u64 = 5;
 // Merkle tree depth
 const TREE_DEPTH: usize = 32;
 
-/// Console logging for debugging
+/// Console logging for debugging (only in WASM target)
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
 }
 
+#[cfg(target_arch = "wasm32")]
 macro_rules! console_log {
     ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! console_log {
+    ($($t:tt)*) => (()) // No-op for non-WASM targets (tests)
 }
 
 /// Input witness for a spend (JSON-serializable).
@@ -981,14 +988,42 @@ mod tests {
     #[test]
     fn test_prover_creation() {
         let prover = WasmProver::new();
-        assert!(prover.circuit_1_1.is_none());
+        // New prover starts with empty circuit cache
+        assert!(prover.circuits.is_empty());
     }
 
     #[test]
     fn test_circuit_prebuild() {
         let mut prover = WasmProver::new();
         prover.prebuild_circuit(1, 1).unwrap();
-        assert!(prover.circuit_1_1.is_some());
+        // Circuit should now be cached
+        assert!(prover.circuits.contains_key(&(1, 1)));
+    }
+
+    #[test]
+    fn test_dynamic_circuit_shapes() {
+        let mut prover = WasmProver::new();
+
+        // Build various shapes
+        prover.prebuild_circuit(2, 1).unwrap();
+        prover.prebuild_circuit(3, 2).unwrap();
+        prover.prebuild_circuit(5, 2).unwrap();
+
+        assert!(prover.circuits.contains_key(&(2, 1)));
+        assert!(prover.circuits.contains_key(&(3, 2)));
+        assert!(prover.circuits.contains_key(&(5, 2)));
+        assert!(!prover.circuits.contains_key(&(4, 1))); // Not built yet
+    }
+
+    // Note: test_circuit_limits is skipped because JsError::new() requires WASM target.
+    // The limit checking is verified by the WASM integration tests instead.
+    #[test]
+    fn test_circuit_max_constants() {
+        // Verify the constants are reasonable
+        assert!(MAX_SPENDS >= 1);
+        assert!(MAX_SPENDS <= 20);
+        assert!(MAX_OUTPUTS >= 1);
+        assert!(MAX_OUTPUTS <= 10);
     }
 
     #[test]
@@ -997,5 +1032,37 @@ mod tests {
         let fields = bytes_to_field_elements(&original);
         let recovered = field_elements_to_bytes(&fields);
         assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_nullifier_computation() {
+        // Test that WASM nullifier function produces consistent results
+        let nk_hex = "0000000000000000000000000000000000000000000000000000000000000001";
+        let cm_hex = "0000000000000000000000000000000000000000000000000000000000000002";
+        let position = "0";
+
+        let result1 = compute_nullifier_wasm(nk_hex, cm_hex, position).unwrap();
+        let result2 = compute_nullifier_wasm(nk_hex, cm_hex, position).unwrap();
+
+        // Should be deterministic
+        assert_eq!(result1, result2);
+        // Should produce 64-char hex (32 bytes)
+        assert_eq!(result1.len(), 64);
+    }
+
+    #[test]
+    fn test_note_commitment_computation() {
+        // Test that WASM commitment function produces consistent results
+        let value = "1000000";
+        let pk_hex = "0000000000000000000000000000000000000000000000000000000000000001";
+        let rand_hex = "0000000000000000000000000000000000000000000000000000000000000002";
+
+        let result1 = compute_note_commitment_wasm(value, pk_hex, rand_hex).unwrap();
+        let result2 = compute_note_commitment_wasm(value, pk_hex, rand_hex).unwrap();
+
+        // Should be deterministic
+        assert_eq!(result1, result2);
+        // Should produce 64-char hex (32 bytes)
+        assert_eq!(result1.len(), 64);
     }
 }
