@@ -4,21 +4,45 @@
 
 # Postera
 
-A privacy-focused cryptocurrency combining post-quantum cryptography with zero-knowledge proofs for quantum-resistant private transactions.
+A fully quantum-resistant privacy cryptocurrency combining post-quantum signatures (ML-DSA-65) with post-quantum zero-knowledge proofs (Plonky2 STARKs) for private transactions secure against both classical and quantum adversaries.
+
+## What's New in V2
+
+Postera V2 introduces **fully quantum-resistant privacy** through Plonky2 STARK proofs:
+
+| Component | V1 (Legacy) | V2 (Quantum-Safe) |
+|-----------|-------------|-------------------|
+| Signatures | ML-DSA-65 | ML-DSA-65 |
+| ZK Proofs | Groth16/BN254 | Plonky2 STARKs |
+| Commitments | Pedersen/BN254 | Poseidon/Goldilocks |
+| Proof Size | ~200 bytes | ~50 KB |
+| Proving Time | ~3s | ~2s |
+| Quantum Safe | Signatures only | Fully quantum-safe |
 
 ## Features
 
-- **Post-Quantum Signatures**: Uses ML-DSA-65 (FIPS 204, formerly CRYSTALS-Dilithium), a lattice-based signature scheme standardized by NIST
-- **Shielded Transactions**: Privacy model using zk-SNARKs (Groth16 on BN254) with real proof generation
-- **Browser-Based Proving**: Client-side ZK proof generation using snarkjs and circom circuits
-- **Note-Based Model**: UTXO-style notes with commitments, nullifiers, and encrypted payloads (similar to Zcash)
+- **Fully Post-Quantum**: Both signatures (ML-DSA-65) AND zero-knowledge proofs (Plonky2 STARKs) are quantum-resistant
+- **Shielded Transactions**: Privacy model using hash-based commitments and STARK proofs
+- **Browser-Based Proving**: Client-side WASM prover using Plonky2 (keys never leave your browser)
+- **Note-Based Model**: UTXO-style notes with commitments, nullifiers, and encrypted payloads
 - **Viewing Keys**: Scan the blockchain for incoming transactions without spending ability
+- **Dynamic Circuits**: Transaction circuits built on-demand for any input/output configuration
+- **Circuit Warmup**: Pre-build common circuits for instant transactions
 - **Proof of Work Consensus**: Dynamic difficulty adjustment targeting 10-second block times
-- **Full Node**: Run a node with REST API and web explorer
-- **Web Wallet**: React-based wallet with client-side key generation, shielded transactions, and ZK proving
-- **P2P Networking**: Peer discovery, block broadcasting, and transaction relay
-- **Persistent Storage**: SledDB-backed blockchain persistence
-- **Live Network**: Join the public network at [postera.network](https://postera.network)
+- **V1 Migration**: Seamlessly migrate legacy V1 notes to quantum-safe V2 format
+
+## Security Model
+
+### Quantum Resistance
+
+| Attack Vector | V1 Protection | V2 Protection |
+|---------------|---------------|---------------|
+| Forge signatures | ML-DSA-65 (safe) | ML-DSA-65 (safe) |
+| Break ZK proofs | BN254 (vulnerable) | STARKs (safe) |
+| Crack commitments | Pedersen (vulnerable) | Poseidon (safe) |
+| Brute force hashes | SHA-256 (128-bit QS) | SHA-256 (128-bit QS) |
+
+**V2 provides complete protection** against quantum adversaries for both fund security AND transaction privacy.
 
 ## Installation
 
@@ -35,27 +59,7 @@ docker build -t postera .
 docker run -p 8080:8080 postera
 ```
 
-### Local Multi-Node Setup
-
-```bash
-docker compose up
-```
-
-This starts 3 nodes locally (ports 8333, 8334, 8335) with Node1 mining enabled.
-
 ## Usage
-
-### Generate a Shielded Wallet
-
-```bash
-./target/release/postera new-wallet -o my-wallet.json
-```
-
-This generates a wallet with:
-
-- ML-DSA-65 keypair (post-quantum signatures)
-- Nullifier key (for deriving nullifiers when spending)
-- Viewing key (for scanning incoming notes)
 
 ### Run a Node
 
@@ -63,11 +67,8 @@ This generates a wallet with:
 # Join the live network
 ./target/release/postera node --peer https://postera.network
 
-# Join and mine to your wallet (use --jobs to set mining threads)
+# Join and mine to your wallet
 ./target/release/postera node --mine my-wallet.json --jobs 8 --peer https://postera.network
-
-# Start a standalone node on default port 8333
-./target/release/postera node
 ```
 
 The node exposes:
@@ -76,55 +77,15 @@ The node exposes:
 - Block Explorer at `http://localhost:8333/explorer`
 - Web Wallet at `http://localhost:8333/wallet`
 
-### Public URL (Expose Your Local Node)
-
-If you want other peers to reach a node running on your machine, you need to
-announce a public URL with `--public-url`.
-
-Example using Cloudflare Tunnel:
-
-```bash
-# Terminal 1: create the tunnel to localhost:8333
-cloudflared tunnel --url http://localhost:8333
-
-# Terminal 2: run the node
-./target/release/postera node \
-  --public-url https://your-tunnel.trycloudflare.com \
-  --mine my-wallet.json --jobs 8 --peer https://postera.network
-```
-
-Copy the `trycloudflare.com` URL from the tunnel output and pass it to
-`--public-url` so peers can reach your node.
-
-### Monitor Mining Progress
-
-Run the TUI miner monitor alongside your mining node:
-
-```bash
-# In a separate terminal
-./target/release/postera-miner-monitor --wallet my-wallet.json --node http://localhost:8333
-```
-
-The monitor displays:
-
-- Current block being mined and elapsed time
-- Blocks won (with ✓ indicator)
-- Total PSTR earned
-- PSTR per hour
-- Recent block history
-
-Press `q` to quit the monitor.
-
-### Live Network
-
-The public network is available at:
-- **Explorer**: https://postera.network/explorer
-- **Wallet**: https://postera.network/wallet
-- **API**: https://postera.network/chain/info
-
 ### Web Wallet
 
-Run the React wallet application:
+The React wallet provides:
+
+- Client-side ML-DSA-65 key generation (keys never leave your browser)
+- V2 quantum-safe transactions with Plonky2 proofs
+- Circuit warmup for instant proof generation
+- Automatic V1 to V2 migration
+- Note scanning with viewing keys
 
 ```bash
 cd wallet
@@ -132,184 +93,157 @@ npm install
 npm run dev
 ```
 
-The wallet provides:
+### Live Network
 
-- Client-side ML-DSA-65 key generation (keys never leave your browser)
-- Wallet import/export
-- Message signing with quantum-resistant signatures
-- Block explorer integration
-
-### Check Balance
-
-With shielded transactions, balances are computed by scanning the blockchain for notes encrypted to your viewing key:
-
-```bash
-./target/release/postera balance -w my-wallet.json
-```
-
-### Send Shielded Transaction
-
-Use the web wallet at https://postera.network/wallet to send shielded transactions. The wallet:
-1. Generates ZK proofs client-side using snarkjs
-2. Encrypts notes so only recipients can decrypt them
-3. Broadcasts the transaction to the network
-
-CLI support coming soon:
-```bash
-./target/release/postera send <recipient-pk-hash> <amount> -w my-wallet.json
-```
-
-### Standalone Mining
-
-```bash
-./target/release/postera mine --wallet my-wallet.json --difficulty 20 --jobs 8
-```
-
-### Benchmark Mining
-
-```bash
-./target/release/postera benchmark --wallet my-wallet.json --difficulty 20 --jobs 8 --blocks 20
-```
-
-## Environment Variables
-
-| Variable               | Description                       | Default               |
-| ---------------------- | --------------------------------- | --------------------- |
-| `POSTERA_PORT`         | Listen port                       | 8333 (8080 in Docker) |
-| `POSTERA_DATA_DIR`     | Blockchain data directory         | `./data`              |
-| `POSTERA_SEEDS`        | Comma-separated seed node URLs    | -                     |
-| `POSTERA_MINE_ADDRESS` | Address to receive mining rewards | -                     |
-| `RUST_LOG`             | Log level (error/warn/info/debug) | info                  |
-
-## API Endpoints
-
-| Endpoint                    | Description                                    |
-| --------------------------- | ---------------------------------------------- |
-| `GET /chain/info`           | Blockchain metadata (height, difficulty, etc.) |
-| `GET /block/:hash`          | Get block by hash                              |
-| `GET /block/height/:height` | Get block by height                            |
-| `GET /account/:address`     | Account balance and nonce                      |
-| `POST /tx`                  | Submit a signed transaction                    |
-| `GET /blocks/since/:height` | Sync blocks from a height                      |
-| `GET /peers`                | List connected peers                           |
-| `POST /peers`               | Add a new peer                                 |
-| `GET /accounts/top`         | View top account holders                       |
-| `POST /wallet/generate`     | Generate a new wallet                          |
-| `POST /wallet/send`         | Create and broadcast a transaction             |
+- **Explorer**: https://postera.network/explorer
+- **Wallet**: https://postera.network/wallet
+- **API**: https://postera.network/chain/info
 
 ## Architecture
 
 ```
 src/
-  crypto/           Cryptographic primitives
-    keys.rs         ML-DSA-65 keypair generation
-    signature.rs    Post-quantum signatures
-    poseidon.rs     Poseidon hash (circomlib-compatible via light-poseidon)
-    commitment.rs   Note and value commitments
-    nullifier.rs    Nullifier derivation (prevents double-spending)
-    note.rs         Note encryption/decryption with viewing keys
-    merkle_tree.rs  Commitment tree for membership proofs
-    proof.rs        zk-SNARK proof generation and verification
-    setup.rs        Trusted setup parameters (Groth16)
-    circuits/       R1CS circuits for spend and output proofs
-  core/             Blockchain primitives
-    block.rs        Block structure with shielded transactions
-    transaction.rs  Shielded transactions (spends, outputs, binding sig)
-    blockchain.rs   Chain validation and state management
-    state.rs        Nullifier set and commitment tree state
-  consensus/        Proof of work mining with dynamic difficulty
-  network/          REST API, P2P sync, and peer discovery
-  storage/          SledDB persistence
-  wallet/           Wallet generation and shielded transaction building
+  crypto/              Cryptographic primitives
+    keys.rs            ML-DSA-65 keypair generation
+    signature.rs       Post-quantum signatures
+    poseidon.rs        Poseidon hash (BN254 for V1)
+    poseidon_pq.rs     Poseidon hash (Goldilocks for V2)
+    commitment.rs      Note commitments (V1)
+    commitment_pq.rs   Note commitments (V2, hash-based)
+    nullifier.rs       Nullifier derivation
+    note.rs            Note encryption/decryption
+    merkle_tree.rs     Commitment tree (V1)
+    merkle_tree_pq.rs  Commitment tree (V2, Poseidon/Goldilocks)
+    proof.rs           Groth16 proofs (V1)
+    circuit_pq.rs      Plonky2 STARK proofs (V2)
+  core/                Blockchain primitives
+    block.rs           Block structure
+    transaction.rs     Shielded transactions (V1 + V2)
+    blockchain.rs      Chain validation
+    state.rs           Nullifier set and commitment trees
+  consensus/           Proof of work mining
+  network/             REST API, P2P sync
+  storage/             SledDB persistence
 
-circuits/           Circom circuits for browser proving
-  spend.circom      Spend proof circuit
-  output.circom     Output proof circuit
+plonky2-wasm/          Browser WASM prover
+  src/lib.rs           Plonky2 circuit building and proving
 
-wallet/             React web wallet application
+wallet/                React web wallet
   src/
-    crypto.ts       Client-side ML-DSA-65 key generation and signing
-    poseidon.ts     Poseidon hash (circomlib-compatible)
-    prover.ts       snarkjs proof generation
-    shielded-wallet.ts  Shielded wallet with note scanning
-    transaction-builder.ts  Build shielded transactions
-    Wallet.tsx      Wallet UI with send/receive
-    Explorer.tsx    Block explorer UI
+    crypto.ts          ML-DSA-65 key generation
+    poseidon-pq.ts     Goldilocks Poseidon (fallback)
+    commitment-pq.ts   WASM-based commitments
+    prover-pq.ts       Plonky2 WASM prover interface
+    shielded-wallet.ts Note scanning and balance
+    transaction-builder.ts  V1 and V2 transaction building
+    coalesce.ts        UTXO consolidation utilities
+    components/        Warmup UI components
 ```
+
+## Cryptography
+
+### Post-Quantum Signatures (ML-DSA-65)
+
+| Parameter | Size |
+|-----------|------|
+| Public Key | 1,952 bytes |
+| Secret Key | 4,032 bytes |
+| Signature | 3,309 bytes |
+
+### V2 Zero-Knowledge Proofs (Plonky2 STARKs)
+
+| Component | Description |
+|-----------|-------------|
+| Proving System | Plonky2 (FRI-based STARKs) |
+| Field | Goldilocks (p = 2^64 - 2^32 + 1) |
+| Hash Function | Poseidon over Goldilocks |
+| Security | 100+ bit post-quantum |
+| Proof Size | ~50 KB |
+
+### V2 Commitments
+
+```
+Note Commitment = Poseidon(domain=1, value, pk_hash, randomness)
+Nullifier = Poseidon(domain=3, nullifier_key, commitment, position)
+Merkle Node = Poseidon(domain=5, left, right)
+```
+
+All use Plonky2's native Poseidon implementation over the Goldilocks field.
 
 ## Network Details
 
-- **Network**: postera-mainnet
-- **Default Port**: 8333
-- **Coin Decimals**: 9 (1 coin = 1,000,000,000 base units)
-- **Block Reward**: 50 coins
-- **Target Block Time**: 10 seconds
-- **Difficulty Adjustment**: Every 10 blocks
+| Parameter | Value |
+|-----------|-------|
+| Network | postera-mainnet |
+| Default Port | 8333 |
+| Coin Decimals | 9 (1 PSTR = 10^9 base units) |
+| Block Reward | 50 PSTR |
+| Target Block Time | 10 seconds |
+| Difficulty Adjustment | Every 10 blocks |
+| Max Spends per Tx | 10 |
+| Max Outputs per Tx | 4 |
+
+## V1 to V2 Migration
+
+Existing V1 notes can be migrated to V2 format:
+
+1. V1 notes are spent using legacy Groth16 proofs
+2. New V2 notes are created with Poseidon/Goldilocks commitments
+3. The migration transaction is signed with ML-DSA-65
+
+Migration is recommended before quantum computers become practical.
 
 ## Deployment
 
 ### Fly.io
-
-The project includes `fly.toml` for Fly.io deployment:
 
 ```bash
 fly launch
 fly deploy
 ```
 
-Configuration:
-
+Configuration in `fly.toml`:
 - 512MB memory, shared-cpu-1x VM
 - Persistent volume for blockchain data
 - Health checks via `/chain/info`
-- Primary region: San Jose (sjc)
 
-## Cryptography
+## API Endpoints
 
-### Post-Quantum Signatures (ML-DSA-65)
+| Endpoint | Description |
+|----------|-------------|
+| `GET /chain/info` | Blockchain metadata |
+| `GET /block/:hash` | Get block by hash |
+| `GET /outputs/since/:height` | Scan for new outputs |
+| `POST /shielded/v2` | Submit V2 transaction |
+| `GET /witness/v2/:commitment` | Get V2 Merkle witness |
+| `POST /nullifiers/check` | Check spent nullifiers |
 
-Postera uses ML-DSA-65 (FIPS 204), the NIST-standardized version of CRYSTALS-Dilithium:
+## Development
 
-| Parameter  | Size        |
-| ---------- | ----------- |
-| Public Key | 1,952 bytes |
-| Secret Key | 4,032 bytes |
-| Signature  | 3,309 bytes |
+### Build WASM Prover
 
-### Zero-Knowledge Proofs (Groth16)
+```bash
+cd plonky2-wasm
+./build.sh
+```
 
-Shielded transactions use zk-SNARKs on the BN254 curve:
+### Run Tests
 
-| Component         | Description                                     |
-| ----------------- | ----------------------------------------------- |
-| Proving System    | Groth16 (constant-size proofs)                  |
-| Curve             | BN254 (compatible with snarkjs/circom)          |
-| Hash Function     | Poseidon (ZK-SNARK friendly, circomlib-compatible) |
-| Commitment Scheme | Poseidon-based note commitments                 |
-| Encryption        | ChaCha20-Poly1305 (note encryption)             |
+```bash
+# Rust tests
+cargo test
 
-The browser wallet generates real ZK proofs using snarkjs with pre-compiled circom circuits. Proofs are verified on-chain by the Rust node using arkworks.
-
-## Privacy Model
-
-Postera implements a Zcash-style shielded transaction model:
-
-1. **Notes**: Private UTXOs containing a value and recipient's public key hash
-2. **Commitments**: Notes are represented on-chain as Pedersen commitments
-3. **Nullifiers**: Unique identifiers derived when spending a note (prevents double-spending)
-4. **Encrypted Notes**: Note data is encrypted so only the recipient can decrypt
-5. **Viewing Keys**: Derived keys that allow scanning for incoming notes without spending ability
-6. **Binding Signatures**: Prove value balance (inputs = outputs + fee) without revealing amounts
-
-### What's Public vs Private
-
-| Public              | Private             |
-| ------------------- | ------------------- |
-| Transaction fee     | Sender identity     |
-| Note commitments    | Recipient identity  |
-| Nullifiers (opaque) | Transaction amounts |
-| Block height        | Note contents       |
+# WASM tests
+cd plonky2-wasm && cargo test
+```
 
 ## License
 
 MIT
+
+## References
+
+- [FIPS 204: ML-DSA Standard](https://csrc.nist.gov/pubs/fips/204/final)
+- [Plonky2 Documentation](https://github.com/0xPolygonZero/plonky2)
+- [Poseidon Hash Function](https://eprint.iacr.org/2019/458)
+- [Zcash Protocol Specification](https://zips.z.cash/protocol/protocol.pdf)

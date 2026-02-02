@@ -1,5 +1,27 @@
+# WASM build stage - build plonky2-wasm for browser
+FROM rust:1.85-bookworm AS wasm-builder
+
+# Install wasm-pack
+RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+# Install nightly toolchain (required by plonky2)
+RUN rustup install nightly && rustup target add wasm32-unknown-unknown --toolchain nightly
+
+WORKDIR /app/plonky2-wasm
+
+# Copy plonky2-wasm source
+COPY plonky2-wasm/ ./
+
+# Build WASM package for web
+RUN rustup run nightly wasm-pack build --target web --release
+
 # Frontend build stage
 FROM node:22-bookworm-slim AS frontend-builder
+
+WORKDIR /app
+
+# Copy the built WASM package
+COPY --from=wasm-builder /app/plonky2-wasm/pkg ./plonky2-wasm/pkg
 
 WORKDIR /app/wallet
 
@@ -15,6 +37,9 @@ RUN npm run build
 
 # Rust build stage
 FROM rust:1.85-bookworm AS builder
+
+# Install nightly toolchain (required by plonky2)
+RUN rustup install nightly && rustup default nightly
 
 WORKDIR /app
 

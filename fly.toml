@@ -26,13 +26,14 @@ primary_region = 'sjc'
   min_machines_running = 1
   processes = ['app']
 
-  [[http_service.checks]]
-    interval = '30s'
-    timeout = '10s'
-    grace_period = '30s'
-    method = 'GET'
-    path = '/chain/info'
+# Health check temporarily commented out - app takes >1min to load blockchain
+  # [[http_service.checks]]
+  #   interval = '30s'
+  #   timeout = '10s'
+  #   grace_period = '60s'
+  #   method = 'GET'
+  #   path = '/chain/info'
 
 [[vm]]
-  size = 'shared-cpu-1x'
-  memory = '512mb'
+  size = 'shared-cpu-2x'
+  memory = '1gb'
