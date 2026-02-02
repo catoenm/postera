@@ -60,3 +60,46 @@ pub fn get_data_dir() -> String {
 pub fn get_mining_address() -> Option<String> {
     std::env::var("POSTERA_MINE_ADDRESS").ok()
 }
+
+// ============================================================================
+// Assume-Valid Checkpoints
+// ============================================================================
+//
+// Assume-valid allows faster initial sync by skipping ZK proof verification
+// for blocks before a known-good checkpoint. The block structure, PoW, and
+// state transitions are still fully validated - only the expensive STARK/Groth16
+// proof verification is skipped.
+//
+// This is the same approach used by Bitcoin Core since 0.14.0.
+//
+// To update: Set ASSUME_VALID_HEIGHT to a recent block height and
+// ASSUME_VALID_HASH to that block's hash. Nodes will skip proof verification
+// for blocks at or below this height.
+
+/// Height of the assume-valid checkpoint.
+/// Blocks at or below this height skip ZK proof verification during sync.
+/// Set to 0 to disable assume-valid (verify all proofs).
+pub const ASSUME_VALID_HEIGHT: u64 = 0;
+
+/// Block hash at the assume-valid height (hex string).
+/// Used to verify we're on the correct chain before trusting the checkpoint.
+/// Only relevant when ASSUME_VALID_HEIGHT > 0.
+pub const ASSUME_VALID_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Check if assume-valid is enabled.
+pub fn is_assume_valid_enabled() -> bool {
+    ASSUME_VALID_HEIGHT > 0 && !is_assume_valid_disabled_by_env()
+}
+
+/// Check if assume-valid is disabled via environment variable.
+/// Set POSTERA_FULL_VERIFY=1 to force full verification of all proofs.
+pub fn is_assume_valid_disabled_by_env() -> bool {
+    std::env::var("POSTERA_FULL_VERIFY")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+}
+
+/// Get the assume-valid configuration.
+pub fn get_assume_valid_config() -> (u64, String) {
+    (ASSUME_VALID_HEIGHT, ASSUME_VALID_HASH.to_string())
+}

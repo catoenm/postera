@@ -2,6 +2,8 @@ export interface Wallet {
   address: string;
   public_key: string;
   secret_key: string;
+  /** Block height when wallet was created (for faster scanning) */
+  birthday?: number;
 }
 
 export interface Account {

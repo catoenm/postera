@@ -40,11 +40,16 @@ pub struct ShieldedBlockchain {
     orphans: HashMap<[u8; 32], ShieldedBlock>,
     /// Verifying parameters for zk-SNARK proof verification (Circom circuits).
     verifying_params: Option<Arc<CircomVerifyingParams>>,
+    /// Assume-valid height: skip proof verification for blocks at or below this height.
+    /// Set to 0 to disable (verify all proofs).
+    assume_valid_height: u64,
 }
 
 impl ShieldedBlockchain {
     /// Create a new blockchain with a genesis block (in-memory only).
     pub fn new(difficulty: u64, genesis_coinbase: CoinbaseTransaction) -> Self {
+        use crate::config;
+
         let genesis = ShieldedBlock::genesis(difficulty, genesis_coinbase.clone());
         let genesis_hash = genesis.hash();
 
@@ -54,6 +59,13 @@ impl ShieldedBlockchain {
         let mut state = ShieldedState::new();
         state.apply_coinbase(&genesis_coinbase);
 
+        // Get assume-valid configuration
+        let assume_valid_height = if config::is_assume_valid_enabled() {
+            config::ASSUME_VALID_HEIGHT
+        } else {
+            0
+        };
+
         Self {
             blocks,
             height_index: vec![genesis_hash],
@@ -62,6 +74,7 @@ impl ShieldedBlockchain {
             db: None,
             orphans: HashMap::new(),
             verifying_params: None,
+            assume_valid_height,
         }
     }
 
@@ -143,6 +156,13 @@ impl ShieldedBlockchain {
                 state.nullifier_count()
             );
 
+            // Get assume-valid configuration
+            let assume_valid_height = if crate::config::is_assume_valid_enabled() {
+                crate::config::ASSUME_VALID_HEIGHT
+            } else {
+                0
+            };
+
             Ok(Self {
                 blocks,
                 height_index,
@@ -151,6 +171,7 @@ impl ShieldedBlockchain {
                 db: Some(db),
                 orphans: HashMap::new(),
                 verifying_params: None,
+                assume_valid_height,
             })
         } else {
             // Create a fresh chain with a dummy genesis
@@ -185,6 +206,13 @@ impl ShieldedBlockchain {
             let mut state = ShieldedState::new();
             state.apply_coinbase(&genesis_coinbase);
 
+            // Get assume-valid configuration
+            let assume_valid_height = if crate::config::is_assume_valid_enabled() {
+                crate::config::ASSUME_VALID_HEIGHT
+            } else {
+                0
+            };
+
             Ok(Self {
                 blocks,
                 height_index: vec![genesis_hash],
@@ -193,6 +221,7 @@ impl ShieldedBlockchain {
                 db: Some(db),
                 orphans: HashMap::new(),
                 verifying_params: None,
+                assume_valid_height,
             })
         }
     }
@@ -320,6 +349,10 @@ impl ShieldedBlockchain {
     }
 
     /// Validate a block before adding it.
+    ///
+    /// If assume-valid is enabled and the block height is at or below the
+    /// assume-valid checkpoint, ZK proof verification is skipped. Block structure,
+    /// proof-of-work, and state transitions are still fully validated.
     pub fn validate_block(&self, block: &ShieldedBlock) -> Result<(), BlockchainError> {
         // Check previous hash
         if block.header.prev_hash != self.latest_hash() {
@@ -344,27 +377,46 @@ impl ShieldedBlockchain {
             .validate_coinbase(&block.coinbase, expected_reward, expected_height)
             .map_err(|e| BlockchainError::StateError(e))?;
 
-        // Validate all V1 transactions
-        if let Some(ref params) = self.verifying_params {
-            for tx in &block.transactions {
-                self.state
-                    .validate_transaction(tx, params)
-                    .map_err(|e| BlockchainError::StateError(e))?;
-            }
-        } else {
-            // If no verifying params, just do basic validation
+        // Check if we should skip proof verification (assume-valid optimization)
+        let skip_proof_verification = self.assume_valid_height > 0
+            && expected_height <= self.assume_valid_height;
+
+        if skip_proof_verification {
+            // Still validate transaction structure and nullifiers, just skip ZK proofs
             for tx in &block.transactions {
                 self.state
                     .validate_transaction_basic(tx)
                     .map_err(|e| BlockchainError::StateError(e))?;
             }
-        }
+            for tx in &block.transactions_v2 {
+                self.state
+                    .validate_transaction_v2_basic(tx)
+                    .map_err(|e| BlockchainError::StateError(e))?;
+            }
+        } else {
+            // Full validation including ZK proof verification
+            // Validate all V1 transactions
+            if let Some(ref params) = self.verifying_params {
+                for tx in &block.transactions {
+                    self.state
+                        .validate_transaction(tx, params)
+                        .map_err(|e| BlockchainError::StateError(e))?;
+                }
+            } else {
+                // If no verifying params, just do basic validation
+                for tx in &block.transactions {
+                    self.state
+                        .validate_transaction_basic(tx)
+                        .map_err(|e| BlockchainError::StateError(e))?;
+                }
+            }
 
-        // Validate all V2 transactions
-        for tx in &block.transactions_v2 {
-            self.state
-                .validate_transaction_v2(tx)
-                .map_err(|e| BlockchainError::StateError(e))?;
+            // Validate all V2 transactions (with STARK proof verification)
+            for tx in &block.transactions_v2 {
+                self.state
+                    .validate_transaction_v2(tx)
+                    .map_err(|e| BlockchainError::StateError(e))?;
+            }
         }
 
         // Verify commitment root matches expected
@@ -700,7 +752,18 @@ impl ShieldedBlockchain {
             commitment_count: self.commitment_count(),
             nullifier_count: self.nullifier_count() as u64,
             proof_verification_enabled: self.verifying_params.is_some(),
+            assume_valid_height: self.assume_valid_height,
         }
+    }
+
+    /// Get the current assume-valid height.
+    pub fn assume_valid_height(&self) -> u64 {
+        self.assume_valid_height
+    }
+
+    /// Set the assume-valid height (for testing or manual override).
+    pub fn set_assume_valid_height(&mut self, height: u64) {
+        self.assume_valid_height = height;
     }
 
     /// Get recent block hashes (for sync protocol).
@@ -733,6 +796,9 @@ pub struct ChainInfo {
     pub commitment_count: u64,
     pub nullifier_count: u64,
     pub proof_verification_enabled: bool,
+    /// Assume-valid checkpoint height. Blocks at or below this height
+    /// skip ZK proof verification during sync. Set to 0 if disabled.
+    pub assume_valid_height: u64,
 }
 
 #[derive(Debug, thiserror::Error)]

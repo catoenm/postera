@@ -136,15 +136,10 @@ async fn wait_for_initial_sync(
             (chain.height(), hex::encode(chain.latest_hash()))
         };
 
-        // Allow solo mining on fresh chain (genesis) when no peers are available
+        // Allow solo mining when no peers are available (single-node deployment)
         if peers.is_empty() {
-            if local_height == 0 {
-                println!("No peers available but chain is at genesis. Starting solo mining...");
-                return Ok(());
-            }
-            return Err(anyhow::anyhow!(
-                "No peers available; cannot verify sync before mining."
-            ));
+            println!("No peers configured. Starting solo mining at height {}...", local_height);
+            return Ok(());
         }
 
         let mut best_peer: Option<(String, PeerChainInfo)> = None;
@@ -267,6 +262,12 @@ enum Commands {
         /// Disable connecting to seed nodes
         #[arg(long)]
         no_seeds: bool,
+        /// Disable assume-valid and verify all ZK proofs from genesis
+        #[arg(long)]
+        full_verify: bool,
+        /// Allow mining without peer sync verification (for solo/testing)
+        #[arg(long)]
+        force_mine: bool,
     },
 }
 
@@ -331,10 +332,17 @@ async fn main() -> anyhow::Result<()> {
             simd,
             public_url,
             no_seeds,
+            full_verify,
+            force_mine,
         } => {
             // Use config defaults, with CLI/env overrides
             let port = port.unwrap_or_else(config::get_port);
             let data_dir = data_dir.unwrap_or_else(config::get_data_dir);
+
+            // Set full verify mode via environment variable (config.rs checks this)
+            if full_verify {
+                std::env::set_var("POSTERA_FULL_VERIFY", "1");
+            }
 
             // Combine seed nodes with CLI peers
             let mut peers = if no_seeds {
@@ -352,6 +360,7 @@ async fn main() -> anyhow::Result<()> {
                 jobs,
                 simd.map(Into::into),
                 public_url,
+                force_mine,
             )
             .await?;
         }
@@ -488,6 +497,7 @@ async fn cmd_node(
     jobs: usize,
     simd: Option<SimdMode>,
     public_url: Option<String>,
+    force_mine: bool,
 ) -> anyhow::Result<()> {
     use postera::network::{AppState, MinerStats, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
     use postera::crypto::proof::CircomVerifyingParams;
@@ -545,6 +555,14 @@ async fn cmd_node(
 
     blockchain.set_verifying_params(Arc::new(verifying_params));
     println!("  ZK proof verification ENABLED (Circom/snarkjs)");
+
+    // Show assume-valid checkpoint status
+    let assume_valid_height = blockchain.assume_valid_height();
+    if assume_valid_height > 0 {
+        println!("  Assume-valid checkpoint: height {} (proofs skipped during sync)", assume_valid_height);
+    } else {
+        println!("  Assume-valid: DISABLED (full proof verification from genesis)");
+    }
     println!();
 
     let state = Arc::new(AppState {
@@ -611,8 +629,12 @@ async fn cmd_node(
 
     // Start integrated miner if requested
     if let Some((miner_pk_hash, viewing_key)) = miner_info {
-        println!("Waiting for initial sync before mining...");
-        wait_for_initial_sync(state.clone(), 300).await?;
+        if force_mine {
+            println!("Force mining enabled - skipping sync verification");
+        } else {
+            println!("Waiting for initial sync before mining...");
+            wait_for_initial_sync(state.clone(), 300).await?;
+        }
 
         let jobs = jobs.max(1);
         let mine_state = state.clone();

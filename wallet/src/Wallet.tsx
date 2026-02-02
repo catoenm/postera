@@ -14,7 +14,7 @@ import {
   createShieldedTransactionV2,
   validateTransactionParams,
 } from './transaction-builder';
-import { submitShieldedTransactionV2 } from './api';
+import { submitShieldedTransactionV2, getChainInfo } from './api';
 import type { Wallet as WalletType } from './types';
 import './App.css';
 
@@ -72,6 +72,10 @@ export default function Wallet() {
         await ShieldedWallet.initialize(false, (msg) => setScanStatus(msg));
 
         const sw = ShieldedWalletV2.fromHexV2(wallet.secret_key, wallet.public_key);
+        // Set wallet birthday for faster scanning (skip outputs before wallet creation)
+        if (wallet.birthday) {
+          sw.birthday = wallet.birthday;
+        }
         setShieldedWallet(sw);
         updateBalanceDisplay(sw);
 
@@ -137,10 +141,21 @@ export default function Wallet() {
       const pkHash = computePkHash(publicKey);
       const address = bytesToHex(pkHash);
 
+      // Get current chain height as wallet birthday (for faster scanning)
+      let birthday: number | undefined;
+      try {
+        const chainInfo = await getChainInfo();
+        birthday = chainInfo.height;
+      } catch {
+        // If chain info unavailable, skip birthday (will scan from genesis)
+        console.warn('Could not get chain height for wallet birthday');
+      }
+
       const newWallet: WalletType = {
         address,
         public_key: bytesToHex(publicKey),
         secret_key: bytesToHex(secretKey),
+        birthday,
       };
 
       localStorage.setItem(STORAGE_KEY, JSON.stringify(newWallet));

@@ -41,6 +41,8 @@ export class ShieldedWallet {
   notes: WalletNote[];
   /** Last scanned block height */
   lastScannedHeight: number;
+  /** Wallet birthday (block height when created) - scan starts from here */
+  birthday: number = 0;
   /** Scanning state */
   private scanning: boolean = false;
 
@@ -175,10 +177,20 @@ export class ShieldedWallet {
         this.lastScannedHeight = -1;
       }
 
-      // API expects unsigned height, use 0 for initial scan
+      // API expects unsigned height
       // When sinceHeight=0, API returns ALL outputs including genesis
       // When sinceHeight>0, API returns outputs from sinceHeight+1 onwards
-      const sinceHeight = this.lastScannedHeight < 0 ? 0 : this.lastScannedHeight;
+      // Use birthday for first scan to skip old outputs (wallet can't have notes before creation)
+      let sinceHeight: number;
+      if (this.lastScannedHeight < 0) {
+        // First scan - use birthday if set, otherwise scan from genesis
+        sinceHeight = this.birthday > 0 ? this.birthday - 1 : 0;
+        if (this.birthday > 0) {
+          onProgress?.(`Using wallet birthday: starting from height ${this.birthday}`);
+        }
+      } else {
+        sinceHeight = this.lastScannedHeight;
+      }
 
       onProgress?.(`Fetching outputs since height ${sinceHeight}...`);
 
