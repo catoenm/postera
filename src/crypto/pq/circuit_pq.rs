@@ -82,6 +82,7 @@ pub struct OutputTargets {
 }
 
 /// All targets for a transaction circuit.
+#[derive(Clone)]
 pub struct TransactionTargets {
     /// Spend targets
     pub spends: Vec<SpendTargets>,
@@ -372,38 +373,133 @@ impl TransactionCircuit {
     }
 }
 
-/// Pre-built circuits for common transaction shapes.
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+/// Maximum number of spends supported per transaction
+pub const MAX_SPENDS: usize = 10;
+
+/// Maximum number of outputs supported per transaction
+pub const MAX_OUTPUTS: usize = 4;
+
+/// Default warmup: pre-build circuits for 1-5 spends
+pub const DEFAULT_WARMUP_SPENDS: usize = 5;
+
+/// Default warmup: pre-build circuits for 1-2 outputs
+pub const DEFAULT_WARMUP_OUTPUTS: usize = 2;
+
+/// Cached circuit with shared ownership.
+pub type CachedCircuit = Arc<(CircuitData<F, C, D>, TransactionTargets)>;
+
+/// Dynamic circuit cache for transaction verification.
+///
+/// Circuits are built on-demand and cached for reuse. This allows
+/// supporting arbitrary transaction shapes up to the configured limits.
 pub struct CircuitCache {
-    /// 1 spend, 1 output
-    pub circuit_1_1: (CircuitData<F, C, D>, TransactionTargets),
-    /// 1 spend, 2 outputs
-    pub circuit_1_2: (CircuitData<F, C, D>, TransactionTargets),
-    /// 2 spends, 1 output
-    pub circuit_2_1: (CircuitData<F, C, D>, TransactionTargets),
-    /// 2 spends, 2 outputs
-    pub circuit_2_2: (CircuitData<F, C, D>, TransactionTargets),
+    /// Dynamic cache: (num_spends, num_outputs) -> Arc<(circuit_data, targets)>
+    circuits: RwLock<HashMap<(usize, usize), CachedCircuit>>,
 }
 
 impl CircuitCache {
-    /// Build all common circuit shapes.
+    /// Create a new empty circuit cache.
+    ///
+    /// Circuits are built lazily on first use.
     pub fn new() -> Self {
         Self {
-            circuit_1_1: TransactionCircuit::new(1, 1).build(),
-            circuit_1_2: TransactionCircuit::new(1, 2).build(),
-            circuit_2_1: TransactionCircuit::new(2, 1).build(),
-            circuit_2_2: TransactionCircuit::new(2, 2).build(),
+            circuits: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Get the appropriate circuit for a transaction shape.
-    pub fn get(&self, num_spends: usize, num_outputs: usize) -> Option<&(CircuitData<F, C, D>, TransactionTargets)> {
-        match (num_spends, num_outputs) {
-            (1, 1) => Some(&self.circuit_1_1),
-            (1, 2) => Some(&self.circuit_1_2),
-            (2, 1) => Some(&self.circuit_2_1),
-            (2, 2) => Some(&self.circuit_2_2),
-            _ => None,
+    /// Pre-build circuits for common transaction shapes.
+    ///
+    /// Call this at startup to avoid latency on first verification.
+    /// Builds circuits for 1-5 spends × 1-2 outputs (10 shapes).
+    pub fn prebuild_common(&self) -> usize {
+        self.warmup(DEFAULT_WARMUP_SPENDS, DEFAULT_WARMUP_OUTPUTS)
+    }
+
+    /// Warm up the cache by pre-building circuits for a range of shapes.
+    ///
+    /// # Arguments
+    /// * `max_spends` - Build circuits for 1..=max_spends
+    /// * `max_outputs` - Build circuits for 1..=max_outputs
+    ///
+    /// Returns the number of circuits built.
+    pub fn warmup(&self, max_spends: usize, max_outputs: usize) -> usize {
+        let max_s = max_spends.min(MAX_SPENDS);
+        let max_o = max_outputs.min(MAX_OUTPUTS);
+
+        let mut count = 0;
+        for num_spends in 1..=max_s {
+            for num_outputs in 1..=max_o {
+                let key = (num_spends, num_outputs);
+                // Check if already cached
+                {
+                    let cache = self.circuits.read().unwrap();
+                    if cache.contains_key(&key) {
+                        continue;
+                    }
+                }
+                // Build and cache
+                if self.get_or_build(num_spends, num_outputs).is_some() {
+                    count += 1;
+                }
+            }
         }
+        count
+    }
+
+    /// Get the appropriate circuit for a transaction shape, building if needed.
+    ///
+    /// Returns an Arc to the cached circuit data for shared ownership.
+    pub fn get(&self, num_spends: usize, num_outputs: usize) -> Option<CachedCircuit> {
+        self.get_or_build(num_spends, num_outputs)
+    }
+
+    /// Get or build a circuit for the given shape.
+    ///
+    /// Returns an Arc to the circuit data for efficient sharing.
+    pub fn get_or_build(&self, num_spends: usize, num_outputs: usize) -> Option<CachedCircuit> {
+        // Validate limits
+        if num_spends == 0 || num_spends > MAX_SPENDS {
+            return None;
+        }
+        if num_outputs == 0 || num_outputs > MAX_OUTPUTS {
+            return None;
+        }
+
+        let key = (num_spends, num_outputs);
+
+        // Check if already cached (read lock)
+        {
+            let cache = self.circuits.read().unwrap();
+            if let Some(circuit) = cache.get(&key) {
+                return Some(Arc::clone(circuit));
+            }
+        }
+
+        // Build the circuit (outside lock to avoid blocking)
+        let circuit = Arc::new(TransactionCircuit::new(num_spends, num_outputs).build());
+
+        // Insert into cache (write lock)
+        let result = {
+            let mut cache = self.circuits.write().unwrap();
+            // Double-check in case another thread built it
+            if let Some(existing) = cache.get(&key) {
+                Arc::clone(existing)
+            } else {
+                cache.insert(key, Arc::clone(&circuit));
+                circuit
+            }
+        };
+
+        Some(result)
+    }
+
+    /// Check if a circuit shape is supported.
+    pub fn is_supported(num_spends: usize, num_outputs: usize) -> bool {
+        num_spends > 0 && num_spends <= MAX_SPENDS &&
+        num_outputs > 0 && num_outputs <= MAX_OUTPUTS
     }
 }
 
@@ -427,8 +523,23 @@ mod tests {
     #[test]
     fn test_circuit_cache() {
         let cache = CircuitCache::new();
-        assert!(cache.get(1, 1).is_some());
-        assert!(cache.get(2, 2).is_some());
-        assert!(cache.get(5, 5).is_none());
+        // Dynamic building should work for supported shapes
+        assert!(cache.get_or_build(1, 1).is_some());
+        assert!(cache.get_or_build(2, 2).is_some());
+        // Skip large shapes in tests (too slow)
+        // assert!(cache.get_or_build(10, 4).is_some()); // Max supported
+        // Exceeding limits should fail
+        assert!(cache.get_or_build(11, 1).is_none()); // > MAX_SPENDS (10)
+        assert!(cache.get_or_build(1, 5).is_none());  // > MAX_OUTPUTS (4)
+    }
+
+    #[test]
+    fn test_is_supported() {
+        assert!(CircuitCache::is_supported(1, 1));
+        assert!(CircuitCache::is_supported(10, 4)); // Max supported
+        assert!(!CircuitCache::is_supported(0, 1));  // 0 spends
+        assert!(!CircuitCache::is_supported(1, 0));  // 0 outputs
+        assert!(!CircuitCache::is_supported(11, 1)); // > MAX_SPENDS (10)
+        assert!(!CircuitCache::is_supported(1, 5));  // > MAX_OUTPUTS (4)
     }
 }

@@ -724,7 +724,7 @@ pub enum Transaction {
     /// V1 transaction (legacy, uses Groth16 on BN254).
     V1(ShieldedTransaction),
 
-    /// V2 transaction (post-quantum, uses RISC Zero STARKs).
+    /// V2 transaction (post-quantum, uses Plonky2 STARKs).
     V2(ShieldedTransactionV2),
 
     /// Migration transaction (V1 inputs -> V2 outputs).

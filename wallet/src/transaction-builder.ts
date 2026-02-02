@@ -539,7 +539,7 @@ export async function createShieldedTransactionVersioned(
  *
  * This uses:
  * - Hash-based commitments (Poseidon/Goldilocks)
- * - Combined STARK proof (RISC Zero)
+ * - Combined STARK proof (Plonky2)
  * - ML-DSA-65 signatures (already quantum-safe)
  *
  * No binding signature needed - balance is proven in the STARK.
@@ -727,3 +727,21 @@ export function formatTransactionSummaryV2(
   const summary = formatTransactionSummary(spendNotes, recipients, fee);
   return `[V2/Post-Quantum]\n${summary}`;
 }
+
+// Re-export coalescing utilities
+export {
+  coalesceNotes,
+  smartSend,
+  proactiveCoalesce,
+  needsCoalescing,
+  calculateCoalescingTxCount,
+  estimateCoalescingFees,
+  MAX_SPENDS,
+  MAX_OUTPUTS,
+  DEFAULT_COALESCE_TARGET,
+  type CoalesceParams,
+  type CoalesceResult,
+  type SmartSendParams,
+  type SmartSendResult,
+  type ProactiveCoalesceOptions,
+} from './coalesce';

@@ -17,7 +17,7 @@ import { hexToBytes, bytesToHex } from './crypto';
 import { getOutputsSince, checkNullifiers } from './api';
 import { loadProvingKeys, areProvingKeysLoaded } from './prover';
 import { initBindingCrypto, isBindingCryptoReady } from './binding';
-import { deriveNullifierPQ } from './commitment-pq';
+import { deriveNullifierPQ, initPQCrypto, isPQCryptoInitialized } from './commitment-pq';
 import type { WalletNote, ShieldedState, EncryptedOutput } from './types';
 
 /** Whether cryptographic primitives have been initialized */
@@ -78,6 +78,12 @@ export class ShieldedWallet {
       onProgress?.('Initializing Poseidon hash...');
       await initPoseidon();
       cryptoInitialized = true;
+    }
+
+    // Initialize PQ crypto (WASM Poseidon for V2 notes)
+    if (!isPQCryptoInitialized()) {
+      onProgress?.('Initializing PQ crypto (Plonky2 Poseidon)...');
+      await initPQCrypto();
     }
 
     if (loadProver && !areProvingKeysLoaded()) {
@@ -808,6 +814,28 @@ export class ShieldedWalletV2 extends ShieldedWallet {
   clearV2State(): void {
     this.v2Notes = [];
     localStorage.removeItem('postera_shielded_state_v2');
+  }
+
+  /**
+   * Clear V2 state and rescan to recompute nullifiers.
+   *
+   * Use this when nullifier computation has been fixed and you need
+   * to recompute nullifiers for existing V2 notes.
+   */
+  async rescanV2Notes(onProgress?: (msg: string) => void): Promise<number> {
+    onProgress?.('Clearing V2 state...');
+    this.clearV2State();
+
+    // Reset last scanned height to force full rescan
+    const originalHeight = this.lastScannedHeight;
+    this.lastScannedHeight = -1;
+    this.saveState();
+
+    onProgress?.('Rescanning blockchain for V2 notes...');
+    const notesFound = await this.scan(onProgress);
+
+    onProgress?.(`Rescan complete. Found ${this.v2Notes.length} V2 notes.`);
+    return notesFound;
   }
 
   /**

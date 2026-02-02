@@ -188,12 +188,13 @@ impl TransactionProver {
         }
 
         // Get circuit for this shape
-        let (circuit_data, targets) = self
+        let circuit = self
             .circuit_cache
             .get(spend_witnesses.len(), output_witnesses.len())
             .ok_or_else(|| {
                 ProofError::UnsupportedShape(spend_witnesses.len(), output_witnesses.len())
             })?;
+        let (circuit_data, targets) = circuit.as_ref();
 
         // Build witness
         let mut pw = PartialWitness::new();

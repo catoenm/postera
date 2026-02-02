@@ -5,6 +5,12 @@
  * Poseidon hash over the Goldilocks field, replacing the BN254-based
  * Pedersen commitments used in V1.
  *
+ * ## IMPORTANT: WASM Integration
+ *
+ * This module uses Plonky2's native Poseidon implementation via WASM
+ * to ensure commitments and nullifiers match exactly what the circuit computes.
+ * You MUST call `initPQCrypto()` before using these functions.
+ *
  * ## Security Model
  *
  * Hash-based commitments provide:
@@ -20,12 +26,48 @@
  * This is stored as 32 bytes in serialized form.
  */
 
-import {
-  noteCommitmentPQ as poseidonNoteCommitmentPQ,
-  valueCommitmentPQ as poseidonValueCommitmentPQ,
-  deriveNullifierPQ as poseidonDeriveNullifierPQ,
-} from './poseidon-pq';
 import { hexToBytes, bytesToHex } from './crypto';
+
+// WASM module functions - loaded dynamically
+let wasmInitialized = false;
+let wasmComputeNullifier: ((nk: string, cm: string, pos: string) => string) | null = null;
+let wasmComputeNoteCommitment: ((value: string, pk: string, rand: string) => string) | null = null;
+
+/**
+ * Initialize the PQ crypto module.
+ * This loads the Plonky2 WASM module and prepares the Poseidon functions.
+ * MUST be called before using any other functions in this module.
+ */
+export async function initPQCrypto(): Promise<void> {
+  if (wasmInitialized) {
+    return;
+  }
+
+  try {
+    // Dynamically import the WASM module
+    const wasmModule = await import('postera-plonky2-wasm');
+
+    // Initialize the WASM module
+    await wasmModule.default();
+
+    // Store references to the WASM functions
+    wasmComputeNullifier = wasmModule.compute_nullifier_wasm;
+    wasmComputeNoteCommitment = wasmModule.compute_note_commitment_wasm;
+
+    wasmInitialized = true;
+    console.log('PQ crypto initialized with WASM Poseidon');
+  } catch (e) {
+    console.error('Failed to initialize PQ crypto:', e);
+    throw new Error('PQ crypto initialization failed - WASM module not available');
+  }
+}
+
+/**
+ * Check if PQ crypto is initialized.
+ */
+export function isPQCryptoInitialized(): boolean {
+  return wasmInitialized;
+}
 
 /**
  * A hash-based value commitment (post-quantum secure).
@@ -42,21 +84,7 @@ export interface NoteCommitmentPQ {
 }
 
 /**
- * Compute a value commitment using Poseidon hash.
- *
- * @param value - The value to commit to
- * @param randomness - 32 bytes of randomness
- * @returns The commitment (32 bytes)
- */
-export function commitToValuePQ(value: bigint, randomness: Uint8Array): Uint8Array {
-  if (randomness.length !== 32) {
-    throw new Error('Randomness must be 32 bytes');
-  }
-  return poseidonValueCommitmentPQ(value, randomness);
-}
-
-/**
- * Compute a note commitment using Poseidon hash.
+ * Compute a note commitment using Plonky2's native Poseidon.
  *
  * @param value - The note value
  * @param pkHash - Recipient public key hash (32 bytes)
@@ -68,17 +96,26 @@ export function commitToNotePQ(
   pkHash: Uint8Array,
   randomness: Uint8Array
 ): Uint8Array {
+  if (!wasmInitialized || !wasmComputeNoteCommitment) {
+    throw new Error('PQ crypto not initialized - call initPQCrypto() first');
+  }
   if (pkHash.length !== 32) {
     throw new Error('pkHash must be 32 bytes');
   }
   if (randomness.length !== 32) {
     throw new Error('Randomness must be 32 bytes');
   }
-  return poseidonNoteCommitmentPQ(value, pkHash, randomness);
+
+  const commitmentHex = wasmComputeNoteCommitment(
+    value.toString(),
+    bytesToHex(pkHash),
+    bytesToHex(randomness)
+  );
+  return hexToBytes(commitmentHex);
 }
 
 /**
- * Derive a nullifier for a note (PQ version).
+ * Derive a nullifier for a note (PQ version) using Plonky2's native Poseidon.
  *
  * @param nullifierKey - The nullifier key (32 bytes)
  * @param commitment - The note commitment (32 bytes)
@@ -90,13 +127,40 @@ export function deriveNullifierPQ(
   commitment: Uint8Array,
   position: bigint
 ): Uint8Array {
+  if (!wasmInitialized || !wasmComputeNullifier) {
+    throw new Error('PQ crypto not initialized - call initPQCrypto() first');
+  }
   if (nullifierKey.length !== 32) {
     throw new Error('nullifierKey must be 32 bytes');
   }
   if (commitment.length !== 32) {
     throw new Error('commitment must be 32 bytes');
   }
-  return poseidonDeriveNullifierPQ(nullifierKey, commitment, position);
+
+  const nullifierHex = wasmComputeNullifier(
+    bytesToHex(nullifierKey),
+    bytesToHex(commitment),
+    position.toString()
+  );
+  return hexToBytes(nullifierHex);
+}
+
+/**
+ * Compute a value commitment using Poseidon hash.
+ * NOTE: Value commitments are not currently used in V2 transactions,
+ * but this is provided for completeness.
+ *
+ * @param value - The value to commit to
+ * @param randomness - 32 bytes of randomness
+ * @returns The commitment (32 bytes)
+ */
+export function commitToValuePQ(value: bigint, randomness: Uint8Array): Uint8Array {
+  // Value commitments use the same structure as note commitments
+  // but without the pk_hash. For now, we use the TypeScript implementation
+  // since value commitments are not used in V2 proofs.
+  // TODO: Add WASM function if needed
+  const { valueCommitmentPQ } = require('./poseidon-pq');
+  return valueCommitmentPQ(value, randomness);
 }
 
 /**

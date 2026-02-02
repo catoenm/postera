@@ -74,6 +74,22 @@ export default function Wallet() {
         const sw = ShieldedWalletV2.fromHexV2(wallet.secret_key, wallet.public_key);
         setShieldedWallet(sw);
         updateBalanceDisplay(sw);
+
+        // Expose for debugging (remove in production)
+        (window as any).wallet = sw;
+        (window as any).debugWallet = () => {
+          console.log('=== WALLET DEBUG ===');
+          console.log('V2 Balance:', sw.v2Balance.toString());
+          console.log('V2 Unspent Count:', sw.unspentV2Count);
+          console.log('V2 Notes:');
+          sw.v2Notes.forEach((n, i) => {
+            console.log(`  [${i}] value=${n.value}, spent=${n.spent}, nullifier=${n.nullifier?.slice(0, 20)}...`);
+          });
+          console.log('V1 Balance:', sw.v1Balance.toString());
+          console.log('V1 Unspent Count:', sw.unspentCount);
+          return { v2Notes: sw.v2Notes, v1Notes: sw.notes };
+        };
+        console.log('Wallet exposed on window. Run debugWallet() to see state.');
       };
       initializeWallet().catch(console.error);
     }

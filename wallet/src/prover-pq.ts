@@ -121,6 +121,363 @@ export async function prebuildCircuit(numSpends: number, numOutputs: number): Pr
   wasmProver!.prebuild_circuit(numSpends, numOutputs);
 }
 
+/**
+ * Warm up the prover by pre-building common circuit shapes.
+ *
+ * This builds circuits for 1-5 spends × 1-2 outputs (10 shapes).
+ * Call this at wallet initialization to avoid latency on first transactions.
+ *
+ * @param onProgress - Optional callback for progress updates
+ * @returns Number of circuits built
+ */
+export async function warmupProver(onProgress?: (msg: string) => void): Promise<number> {
+  await initProver();
+  onProgress?.('Warming up Plonky2 circuits (1-5 spends × 1-2 outputs)...');
+  const count = wasmProver!.warmup();
+  onProgress?.(`Warmup complete. ${count} circuits ready.`);
+  return count;
+}
+
+/**
+ * Warm up the prover with a custom range of circuit shapes.
+ *
+ * @param maxSpends - Build circuits for 1..=maxSpends (max 10)
+ * @param maxOutputs - Build circuits for 1..=maxOutputs (max 4)
+ * @param onProgress - Optional callback for progress updates
+ * @returns Number of circuits built
+ */
+export async function warmupProverRange(
+  maxSpends: number,
+  maxOutputs: number,
+  onProgress?: (msg: string) => void
+): Promise<number> {
+  await initProver();
+  onProgress?.(`Warming up Plonky2 circuits (1-${maxSpends} spends × 1-${maxOutputs} outputs)...`);
+  const count = wasmProver!.warmup_range(maxSpends, maxOutputs);
+  onProgress?.(`Warmup complete. ${count} circuits ready.`);
+  return count;
+}
+
+/**
+ * Get the maximum supported number of spends.
+ */
+export async function getMaxSpends(): Promise<number> {
+  await initProver();
+  return wasmProver!.max_spends();
+}
+
+/**
+ * Get the maximum supported number of outputs.
+ */
+export async function getMaxOutputs(): Promise<number> {
+  await initProver();
+  return wasmProver!.max_outputs();
+}
+
+/**
+ * Get the list of currently cached circuit shapes.
+ */
+export async function getCachedShapes(): Promise<string> {
+  await initProver();
+  return wasmProver!.cached_shapes();
+}
+
+/**
+ * Warmup progress information.
+ */
+export interface WarmupProgress {
+  /** Current circuit being built (e.g., "(3,2)") */
+  currentShape: string;
+  /** Number of circuits completed */
+  completed: number;
+  /** Total number of circuits to build */
+  total: number;
+  /** Percentage complete (0-100) */
+  percent: number;
+  /** Whether warmup is complete */
+  done: boolean;
+  /** Estimated time remaining in seconds (rough estimate) */
+  estimatedSecondsRemaining: number;
+}
+
+/**
+ * Persisted warmup state.
+ */
+interface PersistedWarmupState {
+  /** Shapes that were warmed up */
+  warmedShapes: string[];
+  /** Max spends that were warmed */
+  maxSpends: number;
+  /** Max outputs that were warmed */
+  maxOutputs: number;
+  /** Timestamp of last warmup completion */
+  completedAt: number;
+  /** Version for cache invalidation */
+  version: number;
+}
+
+const WARMUP_STORAGE_KEY = 'postera_plonky2_warmup';
+const WARMUP_VERSION = 1; // Increment to invalidate old caches
+
+/**
+ * Warmup state for tracking background warmup progress.
+ */
+let warmupState: WarmupProgress | null = null;
+let warmupPromise: Promise<number> | null = null;
+
+/**
+ * Load persisted warmup state from localStorage.
+ */
+function loadPersistedWarmupState(): PersistedWarmupState | null {
+  try {
+    const stored = localStorage.getItem(WARMUP_STORAGE_KEY);
+    if (!stored) return null;
+
+    const state = JSON.parse(stored) as PersistedWarmupState;
+
+    // Check version - invalidate if outdated
+    if (state.version !== WARMUP_VERSION) {
+      localStorage.removeItem(WARMUP_STORAGE_KEY);
+      return null;
+    }
+
+    return state;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save warmup state to localStorage.
+ */
+function savePersistedWarmupState(state: PersistedWarmupState): void {
+  try {
+    localStorage.setItem(WARMUP_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // localStorage might be full or disabled
+  }
+}
+
+/**
+ * Clear persisted warmup state.
+ */
+export function clearWarmupCache(): void {
+  localStorage.removeItem(WARMUP_STORAGE_KEY);
+}
+
+/**
+ * Check if warmup was previously completed for the given configuration.
+ */
+export function wasWarmupCompleted(maxSpends: number = 5, maxOutputs: number = 2): boolean {
+  const persisted = loadPersistedWarmupState();
+  if (!persisted) return false;
+
+  // Check if the persisted warmup covers the requested range
+  return persisted.maxSpends >= maxSpends && persisted.maxOutputs >= maxOutputs;
+}
+
+/**
+ * Get the timestamp of the last warmup completion, or null if never completed.
+ */
+export function getWarmupCompletedAt(): Date | null {
+  const persisted = loadPersistedWarmupState();
+  return persisted ? new Date(persisted.completedAt) : null;
+}
+
+/**
+ * Get the current warmup progress.
+ * Returns null if no warmup is in progress.
+ */
+export function getWarmupProgress(): WarmupProgress | null {
+  return warmupState;
+}
+
+/**
+ * Check if warmup is currently in progress.
+ */
+export function isWarmupInProgress(): boolean {
+  return warmupState !== null && !warmupState.done;
+}
+
+/**
+ * Options for background warmup.
+ */
+export interface WarmupOptions {
+  /** Build circuits for 1..=maxSpends (default: 5, max: 10) */
+  maxSpends?: number;
+  /** Build circuits for 1..=maxOutputs (default: 2, max: 4) */
+  maxOutputs?: number;
+  /** Callback for progress updates */
+  onProgress?: (progress: WarmupProgress) => void;
+  /** Skip if warmup was already completed for this config (default: true) */
+  skipIfCached?: boolean;
+  /** Run silently without updating warmupState (for background re-warming) */
+  silent?: boolean;
+}
+
+/**
+ * Start background warmup of the prover.
+ *
+ * This builds circuits incrementally, yielding to the event loop between each
+ * circuit to keep the UI responsive. Progress can be tracked via getWarmupProgress().
+ *
+ * Warmup state is persisted to localStorage, so subsequent visits will skip
+ * the warmup if it was already completed for the same configuration.
+ *
+ * @param options - Warmup options
+ * @returns Promise that resolves with number of circuits built
+ */
+export async function startBackgroundWarmup(
+  optionsOrMaxSpends?: WarmupOptions | number,
+  maxOutputsLegacy?: number,
+  onProgressLegacy?: (progress: WarmupProgress) => void
+): Promise<number> {
+  // Handle legacy signature: (maxSpends, maxOutputs, onProgress)
+  let options: WarmupOptions;
+  if (typeof optionsOrMaxSpends === 'number') {
+    options = {
+      maxSpends: optionsOrMaxSpends,
+      maxOutputs: maxOutputsLegacy,
+      onProgress: onProgressLegacy,
+    };
+  } else {
+    options = optionsOrMaxSpends || {};
+  }
+
+  const {
+    maxSpends = 5,
+    maxOutputs = 2,
+    onProgress,
+    skipIfCached = true,
+    silent = false,
+  } = options;
+
+  const clampedSpends = Math.min(Math.max(1, maxSpends), 10);
+  const clampedOutputs = Math.min(Math.max(1, maxOutputs), 4);
+
+  // Check if we can skip (already warmed in a previous session)
+  if (skipIfCached && wasWarmupCompleted(clampedSpends, clampedOutputs)) {
+    console.log('Warmup: Using cached warmup state, re-building circuits silently...');
+    // Still need to rebuild in WASM memory, but do it silently
+    return startBackgroundWarmup({
+      maxSpends: clampedSpends,
+      maxOutputs: clampedOutputs,
+      skipIfCached: false,
+      silent: true,
+    });
+  }
+
+  // If already warming up (non-silent), return existing promise
+  if (!silent && warmupPromise && warmupState && !warmupState.done) {
+    return warmupPromise;
+  }
+
+  await initProver();
+
+  const total = clampedSpends * clampedOutputs;
+
+  // Initialize progress state (unless silent)
+  if (!silent) {
+    warmupState = {
+      currentShape: '',
+      completed: 0,
+      total,
+      percent: 0,
+      done: false,
+      estimatedSecondsRemaining: total * 5,
+    };
+  }
+
+  const buildPromise = (async () => {
+    let built = 0;
+    const startTime = Date.now();
+    const warmedShapes: string[] = [];
+
+    for (let spends = 1; spends <= clampedSpends; spends++) {
+      for (let outputs = 1; outputs <= clampedOutputs; outputs++) {
+        const shape = `(${spends},${outputs})`;
+
+        // Update progress (unless silent)
+        if (!silent && warmupState) {
+          warmupState = {
+            ...warmupState,
+            currentShape: shape,
+          };
+          onProgress?.(warmupState);
+        }
+
+        // Build circuit (this is the slow part)
+        const wasBuilt = wasmProver!.warmup_shape(spends, outputs);
+        if (wasBuilt) {
+          built++;
+        }
+        warmedShapes.push(shape);
+
+        // Update progress
+        const completed = (spends - 1) * clampedOutputs + outputs;
+
+        if (!silent && warmupState) {
+          const elapsed = (Date.now() - startTime) / 1000;
+          const avgTimePerCircuit = completed > 0 ? elapsed / completed : 5;
+          const remaining = total - completed;
+
+          warmupState = {
+            currentShape: shape,
+            completed,
+            total,
+            percent: Math.round((completed / total) * 100),
+            done: false,
+            estimatedSecondsRemaining: Math.round(remaining * avgTimePerCircuit),
+          };
+          onProgress?.(warmupState);
+        }
+
+        // Yield to event loop to keep UI responsive
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+
+    // Mark as complete and persist
+    if (!silent && warmupState) {
+      warmupState = {
+        ...warmupState,
+        currentShape: '',
+        done: true,
+        percent: 100,
+        estimatedSecondsRemaining: 0,
+      };
+      onProgress?.(warmupState);
+    }
+
+    // Persist to localStorage
+    savePersistedWarmupState({
+      warmedShapes,
+      maxSpends: clampedSpends,
+      maxOutputs: clampedOutputs,
+      completedAt: Date.now(),
+      version: WARMUP_VERSION,
+    });
+
+    console.log(`Warmup complete: built ${built} circuits (${silent ? 'silent' : 'with UI'})`);
+    return built;
+  })();
+
+  if (!silent) {
+    warmupPromise = buildPromise;
+  }
+
+  return buildPromise;
+}
+
+/**
+ * Wait for any in-progress warmup to complete.
+ */
+export async function waitForWarmup(): Promise<void> {
+  if (warmupPromise) {
+    await warmupPromise;
+  }
+}
+
 // NOTE: Local Merkle validation removed - TypeScript's Poseidon differs from Plonky2's
 // The WASM prover uses Plonky2's native Poseidon which matches the server
 // The server will reject invalid proofs anyway
@@ -288,101 +645,3 @@ export function deserializeProof(bytes: Uint8Array): Plonky2Proof {
   };
 }
 
-// Legacy exports for compatibility during migration
-
-/**
- * @deprecated Use Plonky2Proof instead
- */
-export interface RiscZeroReceipt {
-  receiptBytes: Uint8Array;
-  imageId: Uint8Array;
-  journal: TransactionJournal;
-}
-
-/**
- * @deprecated Use TransactionPublicInputs instead
- */
-export interface TransactionJournal {
-  merkleRoots: Uint8Array[];
-  nullifiers: Uint8Array[];
-  noteCommitments: Uint8Array[];
-  fee: bigint;
-  spendMessages: Uint8Array[];
-}
-
-/**
- * @deprecated Use verifyProofPQ instead
- */
-export async function verifyReceiptPQ(
-  receipt: RiscZeroReceipt,
-  _expectedImageId: Uint8Array
-): Promise<TransactionJournal> {
-  // Legacy compatibility - return journal directly
-  return receipt.journal;
-}
-
-/**
- * @deprecated Use getProofSize instead
- */
-export function getReceiptSize(receipt: RiscZeroReceipt): number {
-  return receipt.receiptBytes.length + receipt.imageId.length;
-}
-
-/**
- * @deprecated
- */
-export function isPlaceholderReceipt(receipt: RiscZeroReceipt): boolean {
-  return receipt.imageId.every(b => b === 0);
-}
-
-/**
- * @deprecated Use deserializeProof instead
- */
-export function deserializeJournal(bytes: Uint8Array): TransactionJournal {
-  // Legacy format parsing
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let offset = 0;
-
-  const numRoots = view.getUint32(offset, true);
-  offset += 4;
-  const merkleRoots: Uint8Array[] = [];
-  for (let i = 0; i < numRoots; i++) {
-    merkleRoots.push(bytes.slice(offset, offset + 32));
-    offset += 32;
-  }
-
-  const numNullifiers = view.getUint32(offset, true);
-  offset += 4;
-  const nullifiers: Uint8Array[] = [];
-  for (let i = 0; i < numNullifiers; i++) {
-    nullifiers.push(bytes.slice(offset, offset + 32));
-    offset += 32;
-  }
-
-  const numCommitments = view.getUint32(offset, true);
-  offset += 4;
-  const noteCommitments: Uint8Array[] = [];
-  for (let i = 0; i < numCommitments; i++) {
-    noteCommitments.push(bytes.slice(offset, offset + 32));
-    offset += 32;
-  }
-
-  const fee = view.getBigUint64(offset, true);
-  offset += 8;
-
-  const numMessages = view.getUint32(offset, true);
-  offset += 4;
-  const spendMessages: Uint8Array[] = [];
-  for (let i = 0; i < numMessages; i++) {
-    spendMessages.push(bytes.slice(offset, offset + 96));
-    offset += 96;
-  }
-
-  return {
-    merkleRoots,
-    nullifiers,
-    noteCommitments,
-    fee,
-    spendMessages,
-  };
-}

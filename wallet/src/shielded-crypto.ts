@@ -308,14 +308,14 @@ export {
 // Re-export PQ prover functions
 export {
   generateTransactionProofPQ,
-  verifyReceiptPQ,
-  deserializeJournal,
-  getReceiptSize,
-  isPlaceholderReceipt,
+  verifyProofPQ,
+  serializeProof,
+  deserializeProof,
+  getProofSize,
   type SpendWitnessPQ,
   type OutputWitnessPQ,
-  type TransactionJournal,
-  type RiscZeroReceipt,
+  type TransactionPublicInputs,
+  type Plonky2Proof,
   ProofError,
 } from './prover-pq';
 

@@ -10,7 +10,7 @@
  * 1. Select V1 notes to migrate
  * 2. Create V1 spend proofs (Groth16)
  * 3. Create V2 output commitments (Poseidon/Goldilocks)
- * 4. Create migration STARK proof (RISC Zero)
+ * 4. Create migration STARK proof (Plonky2)
  * 5. Sign with ML-DSA-65 (already quantum-safe)
  *
  * The resulting migration transaction is accepted by validators that

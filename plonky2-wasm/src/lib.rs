@@ -18,6 +18,8 @@
 //! }));
 //! ```
 
+use std::collections::HashMap;
+
 use plonky2::field::goldilocks_field::GoldilocksField;
 use plonky2::field::types::{Field, PrimeField64};
 use plonky2::hash::poseidon::PoseidonHash;
@@ -139,59 +141,156 @@ struct TransactionTargets {
     fee: Target,
 }
 
+/// Maximum number of spends supported (to prevent DoS via huge circuits)
+const MAX_SPENDS: usize = 10;
+
+/// Maximum number of outputs supported
+const MAX_OUTPUTS: usize = 4;
+
+/// Default warmup: pre-build circuits for 1-5 spends
+const DEFAULT_WARMUP_SPENDS: usize = 5;
+
+/// Default warmup: pre-build circuits for 1-2 outputs
+const DEFAULT_WARMUP_OUTPUTS: usize = 2;
+
 /// WebAssembly prover for Postera transactions.
 ///
 /// This prover generates Plonky2 STARK proofs for shielded transactions.
-/// It pre-builds circuits for common transaction shapes to speed up proving.
+/// Circuits are built dynamically on first use and cached for reuse.
 #[wasm_bindgen]
 pub struct WasmProver {
-    // Pre-built circuits for common shapes
-    circuit_1_1: Option<(CircuitData<F, C, D>, TransactionTargets)>,
-    circuit_1_2: Option<(CircuitData<F, C, D>, TransactionTargets)>,
-    circuit_2_1: Option<(CircuitData<F, C, D>, TransactionTargets)>,
-    circuit_2_2: Option<(CircuitData<F, C, D>, TransactionTargets)>,
+    /// Dynamic circuit cache: (num_spends, num_outputs) -> (circuit_data, targets)
+    circuits: HashMap<(usize, usize), (CircuitData<F, C, D>, TransactionTargets)>,
 }
 
 #[wasm_bindgen]
 impl WasmProver {
     /// Create a new prover instance.
     ///
-    /// This pre-builds circuits for common transaction shapes.
+    /// Circuits are built dynamically on first use and cached for reuse.
     /// Call this once and reuse for multiple proofs.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        console_log!("WasmProver: Initializing...");
+        console_log!("WasmProver: Initializing with dynamic circuit support (max {}x{})...", MAX_SPENDS, MAX_OUTPUTS);
 
         Self {
-            circuit_1_1: None,
-            circuit_1_2: None,
-            circuit_2_1: None,
-            circuit_2_2: None,
+            circuits: HashMap::new(),
         }
     }
 
     /// Pre-build a circuit for a specific transaction shape.
     ///
     /// Call this before proving to reduce latency on first proof.
+    /// Supports any shape up to MAX_SPENDS x MAX_OUTPUTS.
     #[wasm_bindgen]
     pub fn prebuild_circuit(&mut self, num_spends: usize, num_outputs: usize) -> Result<(), JsError> {
-        console_log!("WasmProver: Pre-building circuit for {} spends, {} outputs", num_spends, num_outputs);
-
-        let circuit = build_transaction_circuit(num_spends, num_outputs);
-
-        match (num_spends, num_outputs) {
-            (1, 1) => self.circuit_1_1 = Some(circuit),
-            (1, 2) => self.circuit_1_2 = Some(circuit),
-            (2, 1) => self.circuit_2_1 = Some(circuit),
-            (2, 2) => self.circuit_2_2 = Some(circuit),
-            _ => return Err(JsError::new(&format!(
-                "Unsupported transaction shape: {} spends, {} outputs",
-                num_spends, num_outputs
-            ))),
+        // Validate limits
+        if num_spends == 0 || num_spends > MAX_SPENDS {
+            return Err(JsError::new(&format!(
+                "Invalid num_spends: {} (must be 1-{})",
+                num_spends, MAX_SPENDS
+            )));
+        }
+        if num_outputs == 0 || num_outputs > MAX_OUTPUTS {
+            return Err(JsError::new(&format!(
+                "Invalid num_outputs: {} (must be 1-{})",
+                num_outputs, MAX_OUTPUTS
+            )));
         }
 
-        console_log!("WasmProver: Circuit pre-built successfully");
+        // Check if already built
+        let key = (num_spends, num_outputs);
+        if self.circuits.contains_key(&key) {
+            console_log!("WasmProver: Circuit ({},{}) already cached", num_spends, num_outputs);
+            return Ok(());
+        }
+
+        console_log!("WasmProver: Building circuit for {} spends, {} outputs...", num_spends, num_outputs);
+
+        let circuit = build_transaction_circuit(num_spends, num_outputs);
+        self.circuits.insert(key, circuit);
+
+        console_log!("WasmProver: Circuit ({},{}) built and cached", num_spends, num_outputs);
         Ok(())
+    }
+
+    /// Get the list of currently cached circuit shapes.
+    #[wasm_bindgen]
+    pub fn cached_shapes(&self) -> String {
+        let shapes: Vec<String> = self.circuits.keys()
+            .map(|(s, o)| format!("({},{})", s, o))
+            .collect();
+        shapes.join(", ")
+    }
+
+    /// Get the maximum supported spends.
+    #[wasm_bindgen]
+    pub fn max_spends(&self) -> usize {
+        MAX_SPENDS
+    }
+
+    /// Get the maximum supported outputs.
+    #[wasm_bindgen]
+    pub fn max_outputs(&self) -> usize {
+        MAX_OUTPUTS
+    }
+
+    /// Pre-build circuits for common transaction shapes (warmup).
+    ///
+    /// This builds circuits for 1-5 spends × 1-2 outputs (10 shapes).
+    /// Call this at wallet initialization to avoid latency on first transactions.
+    ///
+    /// Returns the number of circuits built.
+    #[wasm_bindgen]
+    pub fn warmup(&mut self) -> Result<usize, JsError> {
+        self.warmup_range(DEFAULT_WARMUP_SPENDS, DEFAULT_WARMUP_OUTPUTS)
+    }
+
+    /// Pre-build circuits for a custom range of transaction shapes.
+    ///
+    /// # Arguments
+    /// * `max_spends` - Build circuits for 1..=max_spends
+    /// * `max_outputs` - Build circuits for 1..=max_outputs
+    ///
+    /// Returns the number of circuits built.
+    #[wasm_bindgen]
+    pub fn warmup_range(&mut self, max_spends: usize, max_outputs: usize) -> Result<usize, JsError> {
+        let max_s = max_spends.min(MAX_SPENDS);
+        let max_o = max_outputs.min(MAX_OUTPUTS);
+
+        console_log!(
+            "WasmProver: Warming up circuits for 1-{} spends × 1-{} outputs ({} shapes)...",
+            max_s, max_o, max_s * max_o
+        );
+
+        let mut count = 0;
+        for num_spends in 1..=max_s {
+            for num_outputs in 1..=max_o {
+                let key = (num_spends, num_outputs);
+                if !self.circuits.contains_key(&key) {
+                    console_log!("  Building circuit ({},{})...", num_spends, num_outputs);
+                    self.prebuild_circuit(num_spends, num_outputs)?;
+                    count += 1;
+                }
+            }
+        }
+
+        console_log!("WasmProver: Warmup complete. Built {} new circuits.", count);
+        Ok(count)
+    }
+
+    /// Pre-build a single circuit shape (useful for targeted warmup).
+    ///
+    /// Use this to pre-build specific shapes you know you'll need.
+    /// Example: `prover.warmup_shape(4, 1)` for 4-input consolidation.
+    #[wasm_bindgen]
+    pub fn warmup_shape(&mut self, num_spends: usize, num_outputs: usize) -> Result<bool, JsError> {
+        let key = (num_spends, num_outputs);
+        if self.circuits.contains_key(&key) {
+            return Ok(false); // Already cached
+        }
+        self.prebuild_circuit(num_spends, num_outputs)?;
+        Ok(true)
     }
 
     /// Generate a proof for a transaction.
@@ -289,30 +388,15 @@ impl WasmProver {
         num_spends: usize,
         num_outputs: usize,
     ) -> Result<&(CircuitData<F, C, D>, TransactionTargets), JsError> {
-        // Check if we have a pre-built circuit
-        let needs_build = match (num_spends, num_outputs) {
-            (1, 1) => self.circuit_1_1.is_none(),
-            (1, 2) => self.circuit_1_2.is_none(),
-            (2, 1) => self.circuit_2_1.is_none(),
-            (2, 2) => self.circuit_2_2.is_none(),
-            _ => return Err(JsError::new(&format!(
-                "Unsupported transaction shape: {} spends, {} outputs",
-                num_spends, num_outputs
-            ))),
-        };
+        let key = (num_spends, num_outputs);
 
-        if needs_build {
+        // Build if not cached
+        if !self.circuits.contains_key(&key) {
             self.prebuild_circuit(num_spends, num_outputs)?;
         }
 
-        // Return reference to circuit
-        match (num_spends, num_outputs) {
-            (1, 1) => Ok(self.circuit_1_1.as_ref().unwrap()),
-            (1, 2) => Ok(self.circuit_1_2.as_ref().unwrap()),
-            (2, 1) => Ok(self.circuit_2_1.as_ref().unwrap()),
-            (2, 2) => Ok(self.circuit_2_2.as_ref().unwrap()),
-            _ => unreachable!(),
-        }
+        // Return reference to cached circuit
+        Ok(self.circuits.get(&key).unwrap())
     }
 }
 
@@ -320,6 +404,60 @@ impl Default for WasmProver {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ============================================================================
+// Standalone WASM functions for computing commitments and nullifiers.
+// These use the same Poseidon implementation as the circuit, ensuring
+// TypeScript and Rust compute identical values.
+// ============================================================================
+
+/// Compute a note commitment using Plonky2's native Poseidon.
+///
+/// # Arguments
+/// * `value` - The note value as a string
+/// * `pk_hash_hex` - Recipient public key hash (32 bytes, hex)
+/// * `randomness_hex` - Note randomness (32 bytes, hex)
+///
+/// # Returns
+/// The commitment as a hex string (32 bytes)
+#[wasm_bindgen]
+pub fn compute_note_commitment_wasm(
+    value: &str,
+    pk_hash_hex: &str,
+    randomness_hex: &str,
+) -> Result<String, JsError> {
+    let value: u64 = value.parse()
+        .map_err(|_| JsError::new("Invalid value"))?;
+    let pk_hash = hex_to_bytes32(pk_hash_hex)?;
+    let randomness = hex_to_bytes32(randomness_hex)?;
+
+    let commitment = native_note_commitment(value, &pk_hash, &randomness);
+    Ok(hex::encode(commitment))
+}
+
+/// Compute a nullifier using Plonky2's native Poseidon.
+///
+/// # Arguments
+/// * `nullifier_key_hex` - The nullifier key (32 bytes, hex)
+/// * `commitment_hex` - The note commitment (32 bytes, hex)
+/// * `position` - Position in the commitment tree as a string
+///
+/// # Returns
+/// The nullifier as a hex string (32 bytes)
+#[wasm_bindgen]
+pub fn compute_nullifier_wasm(
+    nullifier_key_hex: &str,
+    commitment_hex: &str,
+    position: &str,
+) -> Result<String, JsError> {
+    let nullifier_key = hex_to_bytes32(nullifier_key_hex)?;
+    let commitment = hex_to_bytes32(commitment_hex)?;
+    let position: u64 = position.parse()
+        .map_err(|_| JsError::new("Invalid position"))?;
+
+    let nullifier = native_nullifier(&nullifier_key, &commitment, position);
+    Ok(hex::encode(nullifier))
 }
 
 /// Build a transaction circuit for the given shape.
