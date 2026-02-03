@@ -94,5 +94,5 @@ ENV RUST_LOG=info
 ENV POSTERA_DATA_DIR=/app/data
 ENV POSTERA_PORT=8080
 
-# Run the node with mining enabled
-CMD ["/app/postera", "node", "--mine", "/app/wallet.json"]
+# Run the node with mining and faucet enabled (same wallet for both)
+CMD ["/app/postera", "node", "--mine", "/app/wallet.json", "--faucet-wallet", "/app/wallet.json"]

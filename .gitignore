@@ -17,6 +17,7 @@ wallet/dist/
 
 # Blockchain data
 data/
+data-faucet/
 your-data/
 
 # IDE
