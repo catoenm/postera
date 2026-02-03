@@ -310,9 +310,6 @@ export default function FaucetGame({ onGameEnd, onCancel: _onCancel }: FaucetGam
       </div>
 
       <div className="game-controls">
-        {state.phase === 'idle' && (
-          <p className="game-hint">Press SPACE or tap to jump!</p>
-        )}
 
         {state.phase === 'ended' && (
           <div className="game-results">

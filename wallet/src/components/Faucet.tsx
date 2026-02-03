@@ -195,34 +195,18 @@ export default function Faucet({ pkHash }: FaucetProps) {
 
       {/* Main Action */}
       {status?.can_claim ? (
-        <div className="ready-container">
-          {/* Sparkles */}
-          <div className="sparkles">
-            {Array.from({ length: 12 }, (_, i) => (
-              <div
-                key={i}
-                className="sparkle"
-                style={{
-                  '--delay': `${i * 0.15}s`,
-                  '--angle': `${i * 30}deg`,
-                  '--distance': `${80 + (i % 3) * 20}px`,
-                } as React.CSSProperties}
-              />
-            ))}
-          </div>
-          <button
-            className="play-game-button"
-            onClick={() => setMode('game')}
-            disabled={claiming}
-          >
-            <img src="/logo.png" alt="" className="button-logo" />
-            <span className="button-content">
-              <span className="button-title">Play to Claim</span>
-              <span className="button-reward">Earn 5-50 PSTR</span>
-            </span>
-            <span className="button-icon">⛏️</span>
-          </button>
-        </div>
+        <button
+          className="play-game-button"
+          onClick={() => setMode('game')}
+          disabled={claiming}
+        >
+          <img src="/logo.png" alt="" className="button-logo" />
+          <span className="button-content">
+            <span className="button-title">Play to Claim</span>
+            <span className="button-reward">Earn 5-50 PSTR</span>
+          </span>
+          <span className="button-icon">⛏️</span>
+        </button>
       ) : (
         <div className="countdown-section">
           <div className="countdown-display">
