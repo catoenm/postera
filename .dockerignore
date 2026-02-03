@@ -1,0 +1,62 @@
+# Rust build artifacts (10GB!)
+target/
+
+# WASM build artifacts
+plonky2-wasm/target/
+plonky2-wasm/pkg/
+
+# Node modules and build outputs
+wallet/node_modules/
+wallet/dist/
+circuits/node_modules/
+circuits/build/
+
+# Blockchain data
+data/
+your-data/
+test-data/
+
+# Built static files (rebuilt in Docker)
+static/
+
+# Wallet files (except wallet.json which is needed)
+*.wallet
+new-wallet*.json
+test-wallet.json
+my-wallet.json
+shielded-wallet.json
+wallet2.json
+wallets/
+
+# ZK trusted setup files
+*.ptau
+*powersOfTau*
+powersoftau/
+
+# Circuit artifacts
+*.r1cs
+*.sym
+*.zkey
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Git and CI
+.git/
+.github/
+.gitignore
+
+# Fly.io and Claude
+.fly/
+.claude/
+
+# Misc
+*.tar
+*.log
+README.md
+whitepaper/
+assets/
