@@ -208,6 +208,48 @@ impl Database {
         self.db.flush()?;
         Ok(())
     }
+
+    /// Save a state snapshot for fast loading.
+    pub fn save_state_snapshot(&self, snapshot: &crate::core::StateSnapshotPQ, height: u64) -> Result<(), DatabaseError> {
+        let data = serde_json::to_vec(snapshot)?;
+        self.metadata.insert("state_snapshot_pq", data)?;
+        self.metadata.insert("state_snapshot_height", &height.to_be_bytes())?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// Load the state snapshot if available.
+    pub fn load_state_snapshot(&self) -> Result<Option<(crate::core::StateSnapshotPQ, u64)>, DatabaseError> {
+        let snapshot_data = match self.metadata.get("state_snapshot_pq")? {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let height_data = match self.metadata.get("state_snapshot_height")? {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let snapshot: crate::core::StateSnapshotPQ = serde_json::from_slice(&snapshot_data)?;
+        let height = u64::from_be_bytes(height_data.as_ref().try_into().map_err(|_| {
+            DatabaseError::InvalidData("invalid snapshot height".into())
+        })?);
+
+        Ok(Some((snapshot, height)))
+    }
+
+    /// Get the height at which the snapshot was taken.
+    pub fn get_snapshot_height(&self) -> Result<Option<u64>, DatabaseError> {
+        match self.metadata.get("state_snapshot_height")? {
+            Some(data) => {
+                let height = u64::from_be_bytes(data.as_ref().try_into().map_err(|_| {
+                    DatabaseError::InvalidData("invalid snapshot height".into())
+                })?);
+                Ok(Some(height))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

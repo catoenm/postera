@@ -9,6 +9,8 @@
 
 use std::collections::HashSet;
 
+use serde::{Serialize, Deserialize};
+
 use crate::crypto::{
     merkle_tree::{CommitmentTree, TreeHash},
     nullifier::Nullifier,
@@ -18,7 +20,7 @@ use crate::crypto::{
     },
     pq::{
         commitment_pq::NoteCommitmentPQ,
-        merkle_pq::{CommitmentTreePQ, TreeHashPQ, MerkleWitnessPQ},
+        merkle_pq::{CommitmentTreePQ, CommitmentTreeSnapshot, TreeHashPQ, MerkleWitnessPQ},
     },
 };
 
@@ -638,6 +640,42 @@ impl ShieldedState {
     ) -> Option<crate::crypto::merkle_tree::CommitmentWitness> {
         self.commitment_tree.witness(position)
     }
+
+    // ========================================================================
+    // State Snapshots (for fast loading)
+    // ========================================================================
+
+    /// Create a snapshot of the V2 commitment tree for persistence.
+    pub fn snapshot_pq(&self) -> StateSnapshotPQ {
+        StateSnapshotPQ {
+            tree_snapshot: self.commitment_tree_pq.snapshot(),
+            nullifiers: self.nullifier_set.iter().map(|n| n.0).collect(),
+            version: 1,
+        }
+    }
+
+    /// Restore V2 state from a snapshot.
+    /// Note: This only restores the PQ tree and nullifiers. V1 tree must still be replayed.
+    pub fn restore_pq_from_snapshot(&mut self, snapshot: StateSnapshotPQ) {
+        self.commitment_tree_pq = CommitmentTreePQ::from_snapshot(snapshot.tree_snapshot);
+        self.nullifier_set = snapshot.nullifiers.into_iter().map(Nullifier).collect();
+    }
+
+    /// Check if a snapshot is compatible with this state version.
+    pub fn is_snapshot_compatible(snapshot: &StateSnapshotPQ) -> bool {
+        snapshot.version == 1
+    }
+}
+
+/// Snapshot of the PQ state for fast loading.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StateSnapshotPQ {
+    /// V2 commitment tree snapshot.
+    pub tree_snapshot: CommitmentTreeSnapshot,
+    /// All spent nullifiers.
+    pub nullifiers: Vec<[u8; 32]>,
+    /// Version for compatibility checking.
+    pub version: u32,
 }
 
 /// State errors for shielded transactions.

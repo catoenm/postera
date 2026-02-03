@@ -87,8 +87,8 @@ impl ShieldedBlockchain {
 
     /// Open a persisted blockchain from disk, or create a new one.
     ///
-    /// If the database contains existing blocks, they are loaded and the state
-    /// is rebuilt by replaying all blocks from genesis.
+    /// If a state snapshot exists, it is loaded for fast startup.
+    /// Otherwise, state is rebuilt by replaying all blocks from genesis.
     pub fn open(db_path: &str, difficulty: u64) -> Result<Self, BlockchainError> {
         use crate::crypto::commitment::NoteCommitment;
         use crate::crypto::note::EncryptedNote;
@@ -111,9 +111,48 @@ impl ShieldedBlockchain {
             let mut height_index = Vec::new();
             let mut state = ShieldedState::new();
 
-            // Load all blocks and rebuild state
-            let total_blocks = height + 1;
-            for h in 0..=height {
+            // Try to load state snapshot for fast startup
+            let snapshot_height = match db.load_state_snapshot() {
+                Ok(Some((snapshot, snap_height))) if snap_height <= height => {
+                    tracing::info!(
+                        "Loading state snapshot from height {} (skipping {} blocks)",
+                        snap_height,
+                        snap_height
+                    );
+                    state.restore_pq_from_snapshot(snapshot);
+                    Some(snap_height)
+                }
+                Ok(_) => {
+                    tracing::info!("No valid snapshot found, replaying all blocks");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load snapshot: {}, replaying all blocks", e);
+                    None
+                }
+            };
+
+            // Determine starting height for replay
+            let start_height = snapshot_height.map(|h| h + 1).unwrap_or(0);
+            let blocks_to_replay = height - start_height + 1;
+
+            if start_height > 0 {
+                // Load block hashes for heights we're skipping (needed for height_index)
+                for h in 0..start_height {
+                    let block = db
+                        .load_block_by_height(h)
+                        .map_err(|e| BlockchainError::StorageError(e.to_string()))?
+                        .ok_or_else(|| {
+                            BlockchainError::StorageError(format!("Missing block at height {}", h))
+                        })?;
+                    let hash = block.hash();
+                    blocks.insert(hash, block);
+                    height_index.push(hash);
+                }
+            }
+
+            // Replay blocks from start_height to rebuild/verify state
+            for h in start_height..=height {
                 let block = db
                     .load_block_by_height(h)
                     .map_err(|e| BlockchainError::StorageError(e.to_string()))?
@@ -136,13 +175,23 @@ impl ShieldedBlockchain {
                 blocks.insert(hash, block);
                 height_index.push(hash);
 
-                if h == height || h % 500 == 0 {
+                let progress = h - start_height + 1;
+                if h == height || progress % 500 == 0 {
                     use std::io::{self, Write};
-                    print!("\rLoading blocks: {}/{}", h + 1, total_blocks);
+                    print!("\rLoading blocks: {}/{}", progress, blocks_to_replay);
                     let _ = io::stdout().flush();
                     if h == height {
                         println!();
                     }
+                }
+            }
+
+            // Save updated snapshot for faster future startups
+            if snapshot_height.is_none() || snapshot_height.unwrap() < height {
+                tracing::info!("Saving state snapshot at height {}", height);
+                let snapshot = state.snapshot_pq();
+                if let Err(e) = db.save_state_snapshot(&snapshot, height) {
+                    tracing::warn!("Failed to save state snapshot: {}", e);
                 }
             }
 

@@ -22,7 +22,7 @@ pub use transaction::{
     SpendDescriptionV2, OutputDescriptionV2, ShieldedTransactionV2,
     MigrationTransaction, Transaction,
 };
-pub use state::{ShieldedState, StateError};
+pub use state::{ShieldedState, StateError, StateSnapshotPQ};
 pub use blockchain::{ShieldedBlockchain, ChainInfo};
 
 // Legacy types (for migration)

@@ -115,6 +115,37 @@ impl MerkleWitnessPQ {
     }
 }
 
+/// Serializable representation of a hash (4 field elements as u64s).
+type SerializableHash = [u64; 4];
+
+fn hash_to_serializable(hash: &InternalHash) -> SerializableHash {
+    [hash[0].0, hash[1].0, hash[2].0, hash[3].0]
+}
+
+fn serializable_to_hash(s: &SerializableHash) -> InternalHash {
+    [
+        GoldilocksField(s[0]),
+        GoldilocksField(s[1]),
+        GoldilocksField(s[2]),
+        GoldilocksField(s[3]),
+    ]
+}
+
+/// Snapshot of the commitment tree state for fast loading.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CommitmentTreeSnapshot {
+    /// Number of leaves in the tree.
+    pub size: u64,
+    /// Frontier hashes (as raw u64 arrays for serialization).
+    pub frontier: Vec<SerializableHash>,
+    /// Recent roots for anchor validation.
+    pub recent_roots: Vec<TreeHashPQ>,
+    /// All leaves (as raw u64 arrays for serialization).
+    pub leaves: Vec<SerializableHash>,
+    /// Version for future compatibility.
+    pub version: u32,
+}
+
 /// A commitment tree for storing note commitments.
 ///
 /// Uses an incremental Merkle tree structure where:
@@ -320,6 +351,27 @@ impl CommitmentTreePQ {
             position,
             root: self.root(),
         })
+    }
+
+    /// Create a snapshot of the tree state for persistence.
+    pub fn snapshot(&self) -> CommitmentTreeSnapshot {
+        CommitmentTreeSnapshot {
+            size: self.size,
+            frontier: self.frontier.iter().map(hash_to_serializable).collect(),
+            recent_roots: self.recent_roots.iter().cloned().collect(),
+            leaves: self.leaves.iter().map(hash_to_serializable).collect(),
+            version: 1,
+        }
+    }
+
+    /// Restore tree state from a snapshot.
+    pub fn from_snapshot(snapshot: CommitmentTreeSnapshot) -> Self {
+        Self {
+            size: snapshot.size,
+            frontier: snapshot.frontier.iter().map(serializable_to_hash).collect(),
+            recent_roots: snapshot.recent_roots.into_iter().collect(),
+            leaves: snapshot.leaves.iter().map(serializable_to_hash).collect(),
+        }
     }
 }
 
