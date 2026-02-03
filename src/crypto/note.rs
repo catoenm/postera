@@ -149,7 +149,7 @@ impl ViewingKey {
 
     /// Derive the symmetric encryption key for a note.
     /// Uses the ephemeral public key to derive a shared secret.
-    fn derive_encryption_key(&self, ephemeral_pk: &[u8]) -> [u8; 32] {
+    pub(crate) fn derive_encryption_key(&self, ephemeral_pk: &[u8]) -> [u8; 32] {
         let mut hasher = Blake2s256::new();
         hasher.update(b"Postera_NoteEncryption");
         hasher.update(&self.viewing_secret);
@@ -252,6 +252,94 @@ pub fn compute_pk_hash(public_key: &[u8]) -> [u8; 32] {
     let mut result = [0u8; 32];
     result.copy_from_slice(&hash);
     result
+}
+
+/// Encrypt a V2/PQ note for the recipient.
+///
+/// This creates an encrypted note that the recipient can decrypt using their
+/// viewing key (derived from their pk_hash). Unlike V1 notes which use BN254
+/// field elements, V2 notes use raw byte arrays for randomness.
+///
+/// # Arguments
+/// * `value` - The note value in base units
+/// * `pk_hash` - The recipient's public key hash (32 bytes)
+/// * `randomness` - Random bytes for hiding the note (32 bytes)
+///
+/// # Returns
+/// An `EncryptedNote` that can be included in a V2 transaction output.
+pub fn encrypt_note_pq(value: u64, pk_hash: &[u8; 32], randomness: &[u8; 32]) -> EncryptedNote {
+    use rand::RngCore;
+
+    // Create viewing key from recipient's pk_hash
+    let viewing_key = ViewingKey::from_pk_hash(*pk_hash);
+
+    // Serialize the PQ note data: value || pk_hash || randomness
+    let mut plaintext = Vec::with_capacity(8 + 32 + 32);
+    plaintext.extend_from_slice(&value.to_le_bytes());
+    plaintext.extend_from_slice(pk_hash);
+    plaintext.extend_from_slice(randomness);
+
+    // Generate ephemeral randomness for encryption
+    let mut rng = rand::thread_rng();
+    let mut ephemeral_secret = [0u8; 32];
+    rng.fill_bytes(&mut ephemeral_secret);
+
+    // Derive ephemeral "public key"
+    let mut hasher = Blake2s256::new();
+    hasher.update(b"Postera_EphemeralPK");
+    hasher.update(&ephemeral_secret);
+    let ephemeral_pk: Vec<u8> = hasher.finalize().to_vec();
+
+    // Derive encryption key
+    let encryption_key = viewing_key.derive_encryption_key(&ephemeral_pk);
+
+    // Encrypt using ChaCha20-Poly1305
+    let cipher = ChaCha20Poly1305::new_from_slice(&encryption_key).unwrap();
+    let nonce = Nonce::from_slice(&ephemeral_pk[0..12]);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_ref())
+        .expect("encryption failure");
+
+    EncryptedNote {
+        ciphertext,
+        ephemeral_pk,
+    }
+}
+
+/// Decrypt a V2/PQ note.
+///
+/// # Arguments
+/// * `encrypted` - The encrypted note data
+/// * `pk_hash` - The recipient's public key hash (used as viewing key)
+///
+/// # Returns
+/// `Some((value, pk_hash, randomness))` if decryption succeeds, `None` otherwise.
+pub fn decrypt_note_pq(encrypted: &EncryptedNote, pk_hash: &[u8; 32]) -> Option<(u64, [u8; 32], [u8; 32])> {
+    let viewing_key = ViewingKey::from_pk_hash(*pk_hash);
+
+    // Derive encryption key
+    let encryption_key = viewing_key.derive_encryption_key(&encrypted.ephemeral_pk);
+
+    // Decrypt
+    let cipher = ChaCha20Poly1305::new_from_slice(&encryption_key).ok()?;
+    if encrypted.ephemeral_pk.len() < 12 {
+        return None;
+    }
+    let nonce = Nonce::from_slice(&encrypted.ephemeral_pk[0..12]);
+    let plaintext = cipher.decrypt(nonce, encrypted.ciphertext.as_ref()).ok()?;
+
+    // Parse: value (8) || pk_hash (32) || randomness (32)
+    if plaintext.len() < 72 {
+        return None;
+    }
+
+    let value = u64::from_le_bytes(plaintext[0..8].try_into().ok()?);
+    let mut note_pk_hash = [0u8; 32];
+    note_pk_hash.copy_from_slice(&plaintext[8..40]);
+    let mut randomness = [0u8; 32];
+    randomness.copy_from_slice(&plaintext[40..72]);
+
+    Some((value, note_pk_hash, randomness))
 }
 
 #[cfg(test)]

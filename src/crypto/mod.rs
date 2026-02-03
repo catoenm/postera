@@ -23,7 +23,7 @@ pub use poseidon::{
 };
 pub use commitment::{NoteCommitment, ValueCommitment, commit_to_value, commit_to_note};
 pub use nullifier::{Nullifier, NullifierKey, derive_nullifier};
-pub use note::{Note, EncryptedNote, ViewingKey};
+pub use note::{Note, EncryptedNote, ViewingKey, encrypt_note_pq, decrypt_note_pq};
 pub use merkle_tree::{CommitmentTree, MerklePath};
 pub use proof::{ZkProof, CircomVerifyingParams, verify_spend_proof, verify_output_proof, bytes_to_public_inputs, output_bytes_to_public_inputs};
 pub use snarkjs::{CircomVerifyingKey, verify_proof, parse_proof, parse_public_signals};

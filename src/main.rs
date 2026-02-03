@@ -4,8 +4,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use postera::config::{self, GENESIS_DIFFICULTY};
 use postera::consensus::{MiningPool, SimdMode};
-use postera::core::ShieldedBlockchain;
-use postera::crypto::note::ViewingKey;
+use postera::core::{ShieldedBlock, ShieldedBlockchain};
 use postera::network::{create_router, Mempool};
 use postera::wallet::ShieldedWallet;
 
@@ -268,6 +267,12 @@ enum Commands {
         /// Allow mining without peer sync verification (for solo/testing)
         #[arg(long)]
         force_mine: bool,
+        /// Wallet file for faucet (enables faucet if provided)
+        #[arg(long)]
+        faucet_wallet: Option<String>,
+        /// Override daily faucet limit in PSTR (default: 50)
+        #[arg(long)]
+        faucet_daily_limit: Option<u64>,
     },
 }
 
@@ -334,6 +339,8 @@ async fn main() -> anyhow::Result<()> {
             no_seeds,
             full_verify,
             force_mine,
+            faucet_wallet,
+            faucet_daily_limit,
         } => {
             // Use config defaults, with CLI/env overrides
             let port = port.unwrap_or_else(config::get_port);
@@ -361,6 +368,8 @@ async fn main() -> anyhow::Result<()> {
                 simd.map(Into::into),
                 public_url,
                 force_mine,
+                faucet_wallet,
+                faucet_daily_limit,
             )
             .await?;
         }
@@ -498,10 +507,15 @@ async fn cmd_node(
     simd: Option<SimdMode>,
     public_url: Option<String>,
     force_mine: bool,
+    faucet_wallet: Option<String>,
+    faucet_daily_limit: Option<u64>,
 ) -> anyhow::Result<()> {
     use postera::network::{AppState, MinerStats, sync_from_peer, sync_loop, broadcast_block, discovery_loop, announce_to_peer};
     use postera::crypto::proof::CircomVerifyingParams;
+    use postera::faucet::FaucetService;
+    use postera::storage::Database;
     use std::sync::RwLock;
+    use tokio::sync::RwLock as TokioRwLock;
 
     let simd = require_simd_support(simd);
 
@@ -565,11 +579,39 @@ async fn cmd_node(
     }
     println!();
 
+    // Initialize faucet if wallet provided
+    let faucet_service = if let Some(faucet_path) = &faucet_wallet {
+        let faucet_wlt = ShieldedWallet::load(faucet_path)?;
+        let pk_hash = faucet_wlt.pk_hash();
+        let faucet_pk_hash_hex = hex::encode(pk_hash);
+        println!("Faucet enabled: {} (pk_hash)", &faucet_pk_hash_hex[..16]);
+
+        // Extract keypair for signing
+        let keypair = faucet_wlt.keypair().clone();
+
+        // Open database for faucet claims
+        let db = Arc::new(Database::open(&format!("{}/faucet", data_dir))?);
+
+        let service = if let Some(limit) = faucet_daily_limit {
+            let limit_base = limit * 1_000_000_000; // Convert PSTR to base units
+            println!("  Daily limit: {} PSTR", limit);
+            FaucetService::with_limits(keypair, pk_hash, db, limit_base, 86400)
+        } else {
+            println!("  Daily limit: 50 PSTR (default)");
+            FaucetService::new(keypair, pk_hash, db)
+        };
+
+        Some(TokioRwLock::new(service))
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         blockchain: RwLock::new(blockchain),
         mempool: RwLock::new(mempool),
         peers: RwLock::new(peers.clone()),
         miner_stats: RwLock::new(MinerStats::default()),
+        faucet: faucet_service,
     });
 
     // Create router with API (wallet and explorer are served from static React app)
@@ -624,6 +666,80 @@ async fn cmd_node(
         let discovery_state = state.clone();
         tokio::spawn(async move {
             discovery_loop(discovery_state, 60).await;
+        });
+    }
+
+    // Scan blockchain for faucet notes if enabled
+    if state.faucet.is_some() {
+        println!("Scanning blockchain for faucet notes...");
+
+        // Do initial scan in a blocking task to avoid blocking the async runtime
+        let scan_state = state.clone();
+        let (new_notes, balance) = tokio::task::spawn_blocking(move || {
+            let blockchain = scan_state.blockchain.read().unwrap();
+            let current_height = blockchain.height();
+
+            // Collect blocks into a vec to avoid borrowing issues
+            let blocks: Vec<_> = (0..=current_height)
+                .filter_map(|h| blockchain.get_block_by_height(h).cloned())
+                .collect();
+            drop(blockchain);
+
+            if let Some(ref faucet) = scan_state.faucet {
+                let mut faucet_guard = faucet.blocking_write();
+
+                let get_block = |height: u64| -> Option<ShieldedBlock> {
+                    blocks.get(height as usize).cloned()
+                };
+
+                let new_notes = faucet_guard.scan_blockchain(get_block, current_height);
+                let balance = faucet_guard.balance();
+                (new_notes, balance)
+            } else {
+                (0, 0)
+            }
+        }).await.unwrap_or((0, 0));
+
+        if new_notes > 0 {
+            println!("  Found {} faucet notes, balance: {} PSTR", new_notes, balance / 1_000_000_000);
+        } else {
+            println!("  No faucet notes found (balance: {} PSTR)", balance / 1_000_000_000);
+        }
+
+        // Start background faucet scanning task (every 30 seconds)
+        let faucet_scan_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+
+                let scan_state = faucet_scan_state.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Some(ref faucet) = scan_state.faucet {
+                        let blockchain = scan_state.blockchain.read().unwrap();
+                        let current_height = blockchain.height();
+
+                        let mut faucet_guard = faucet.blocking_write();
+                        let last_scanned = faucet_guard.last_scanned_height();
+
+                        // Only scan if there are new blocks
+                        if current_height > last_scanned {
+                            // Collect only new blocks
+                            let blocks: Vec<_> = ((last_scanned + 1)..=current_height)
+                                .filter_map(|h| blockchain.get_block_by_height(h).cloned())
+                                .collect();
+                            drop(blockchain);
+
+                            let get_block = |height: u64| -> Option<ShieldedBlock> {
+                                let idx = height.saturating_sub(last_scanned + 1) as usize;
+                                blocks.get(idx).cloned()
+                            };
+
+                            let _new_notes = faucet_guard.scan_blockchain(get_block, current_height);
+                        }
+                    }
+                }).await;
+            }
         });
     }
 

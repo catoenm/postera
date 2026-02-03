@@ -113,7 +113,9 @@
       "Bash(pdflatex:*)",
       "Bash(brew list:*)",
       "Bash(git -c commit.gpgsign=false commit -m \"$\\(cat <<''EOF''\nfeat: add favicon using logo.png\n\n- Update index.html to use logo.png as favicon\n- Add apple-touch-icon for mobile devices\n- Serve /favicon.ico for legacy browser support\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
-      "Bash(tectonic:*)"
+      "Bash(tectonic:*)",
+      "Bash(du -sh:*)",
+      "Bash(cargo clippy:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -1,7 +1,33 @@
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use crate::core::{Account, ShieldedBlock};
 use crate::crypto::Address;
+
+/// Faucet claim record stored in the database.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FaucetClaim {
+    /// Unix timestamp of last claim
+    pub last_claim_timestamp: u64,
+    /// Total amount claimed all-time (in base units)
+    pub total_claimed: u64,
+    /// Consecutive day streak
+    pub streak: u32,
+    /// Last streak date in "YYYY-MM-DD" format (UTC)
+    pub last_streak_date: String,
+}
+
+impl Default for FaucetClaim {
+    fn default() -> Self {
+        Self {
+            last_claim_timestamp: 0,
+            total_claimed: 0,
+            streak: 0,
+            last_streak_date: String::new(),
+        }
+    }
+}
 
 /// Sled-based key-value database for persistent storage.
 ///
@@ -11,6 +37,7 @@ use crate::crypto::Address;
 /// - nullifiers: nullifier -> () (existence check)
 /// - accounts: address -> account data
 /// - metadata: key -> value
+/// - faucet_claims: pk_hash -> FaucetClaim
 pub struct Database {
     db: sled::Db,
     blocks: sled::Tree,
@@ -18,6 +45,7 @@ pub struct Database {
     nullifiers: sled::Tree,
     accounts: sled::Tree,
     metadata: sled::Tree,
+    faucet_claims: sled::Tree,
 }
 
 impl Database {
@@ -29,6 +57,7 @@ impl Database {
         let nullifiers = db.open_tree("nullifiers")?;
         let accounts = db.open_tree("accounts")?;
         let metadata = db.open_tree("metadata")?;
+        let faucet_claims = db.open_tree("faucet_claims")?;
 
         Ok(Self {
             db,
@@ -37,6 +66,7 @@ impl Database {
             nullifiers,
             accounts,
             metadata,
+            faucet_claims,
         })
     }
 
@@ -49,6 +79,7 @@ impl Database {
         let nullifiers = db.open_tree("nullifiers")?;
         let accounts = db.open_tree("accounts")?;
         let metadata = db.open_tree("metadata")?;
+        let faucet_claims = db.open_tree("faucet_claims")?;
 
         Ok(Self {
             db,
@@ -57,6 +88,7 @@ impl Database {
             nullifiers,
             accounts,
             metadata,
+            faucet_claims,
         })
     }
 
@@ -249,6 +281,55 @@ impl Database {
             }
             None => Ok(None),
         }
+    }
+
+    // ============ Faucet Claims ============
+
+    /// Get a faucet claim record by pk_hash.
+    pub fn get_faucet_claim(&self, pk_hash: &[u8; 32]) -> Result<Option<FaucetClaim>, DatabaseError> {
+        match self.faucet_claims.get(pk_hash)? {
+            Some(data) => {
+                let claim: FaucetClaim = serde_json::from_slice(&data)?;
+                Ok(Some(claim))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Save a faucet claim record.
+    pub fn save_faucet_claim(&self, pk_hash: &[u8; 32], claim: &FaucetClaim) -> Result<(), DatabaseError> {
+        let data = serde_json::to_vec(claim)?;
+        self.faucet_claims.insert(pk_hash, data)?;
+        Ok(())
+    }
+
+    /// Get total amount distributed by the faucet.
+    pub fn get_faucet_total_distributed(&self) -> Result<u64, DatabaseError> {
+        let mut total = 0u64;
+        for item in self.faucet_claims.iter() {
+            let (_, data) = item?;
+            let claim: FaucetClaim = serde_json::from_slice(&data)?;
+            total = total.saturating_add(claim.total_claimed);
+        }
+        Ok(total)
+    }
+
+    /// Get count of unique faucet claimants.
+    pub fn get_faucet_claimant_count(&self) -> Result<u64, DatabaseError> {
+        Ok(self.faucet_claims.len() as u64)
+    }
+
+    /// Get count of active streaks (streak > 0).
+    pub fn get_faucet_active_streaks(&self) -> Result<u64, DatabaseError> {
+        let mut count = 0u64;
+        for item in self.faucet_claims.iter() {
+            let (_, data) = item?;
+            let claim: FaucetClaim = serde_json::from_slice(&data)?;
+            if claim.streak > 0 {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 }
 

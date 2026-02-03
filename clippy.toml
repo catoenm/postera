@@ -1,0 +1,12 @@
+# Clippy configuration
+# https://doc.rust-lang.org/clippy/configuration.html
+
+# Allow slightly longer functions in crypto code
+too-many-arguments-threshold = 8
+too-many-lines-threshold = 150
+
+# Type complexity threshold (crypto types can get complex)
+type-complexity-threshold = 300
+
+# Cognitive complexity threshold
+cognitive-complexity-threshold = 30

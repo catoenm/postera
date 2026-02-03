@@ -103,3 +103,28 @@ pub fn is_assume_valid_disabled_by_env() -> bool {
 pub fn get_assume_valid_config() -> (u64, String) {
     (ASSUME_VALID_HEIGHT, ASSUME_VALID_HASH.to_string())
 }
+
+// ============================================================================
+// Faucet Configuration
+// ============================================================================
+
+/// Daily faucet limit in base units (50 PSTR = 50 * 10^9)
+pub const FAUCET_DAILY_LIMIT: u64 = 50_000_000_000;
+
+/// Faucet cooldown period in seconds (24 hours)
+pub const FAUCET_COOLDOWN_SECONDS: u64 = 86400;
+
+/// Transaction fee for faucet distributions (0.001 PSTR)
+pub const FAUCET_TX_FEE: u64 = 1_000_000;
+
+/// Balance threshold for low balance warning (1000 PSTR)
+pub const FAUCET_LOW_BALANCE_THRESHOLD: u64 = 1_000_000_000_000;
+
+/// Token value for game-based faucet (5 PSTR per token)
+pub const FAUCET_TOKEN_VALUE: u64 = 5_000_000_000;
+
+/// Maximum tokens collectible in faucet game
+pub const FAUCET_MAX_TOKENS: u8 = 10;
+
+/// Minimum tokens required to claim from game (at least 1 token)
+pub const FAUCET_MIN_TOKENS: u8 = 1;

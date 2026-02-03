@@ -56,6 +56,8 @@ export default defineConfig({
       '/outputs': 'http://localhost:8333',
       '/witness': 'http://localhost:8333',
       '/nullifiers': 'http://localhost:8333',
+      // Faucet API
+      '/faucet': 'http://localhost:8333',
     },
     // Allow serving circuit files from public directory
     fs: {

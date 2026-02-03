@@ -14,8 +14,9 @@ import {
   createShieldedTransactionV2,
   validateTransactionParams,
 } from './transaction-builder';
-import { submitShieldedTransactionV2, getChainInfo } from './api';
+import { submitShieldedTransactionV2, getChainInfo, getFaucetStatus, getFaucetStats } from './api';
 import type { Wallet as WalletType } from './types';
+import Faucet from './components/Faucet';
 import './App.css';
 
 const STORAGE_KEY = 'postera_wallet';
@@ -23,7 +24,7 @@ const STORAGE_KEY = 'postera_wallet';
 export default function Wallet() {
   const [wallet, setWallet] = useState<WalletType | null>(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'wallet' | 'send' | 'receive' | 'sign'>('wallet');
+  const [view, setView] = useState<'wallet' | 'send' | 'receive' | 'faucet' | 'sign'>('wallet');
 
   // Shielded wallet state
   const [shieldedWallet, setShieldedWallet] = useState<ShieldedWalletV2 | null>(null);
@@ -47,6 +48,9 @@ export default function Wallet() {
   const [showImport, setShowImport] = useState(false);
   const [importPk, setImportPk] = useState('');
   const [importSk, setImportSk] = useState('');
+
+  // Faucet status for tab sparkle
+  const [faucetReady, setFaucetReady] = useState(false);
 
   // Show keys state
   const [showKeys, setShowKeys] = useState(false);
@@ -131,6 +135,32 @@ export default function Wallet() {
       handleScan();
     }
   }, [shieldedWallet]);
+
+  // Check faucet status for tab sparkle indicator
+  useEffect(() => {
+    if (!wallet) return;
+
+    const checkFaucetStatus = async () => {
+      try {
+        const stats = await getFaucetStats();
+        if (!stats.enabled) {
+          setFaucetReady(false);
+          return;
+        }
+        const status = await getFaucetStatus(wallet.address);
+        setFaucetReady(status.can_claim);
+      } catch {
+        setFaucetReady(false);
+      }
+    };
+
+    // Check immediately
+    checkFaucetStatus();
+
+    // Check every 30 seconds
+    const interval = setInterval(checkFaucetStatus, 30000);
+    return () => clearInterval(interval);
+  }, [wallet]);
 
   // Create new wallet
   const createWallet = async () => {
@@ -348,6 +378,7 @@ export default function Wallet() {
             <a className="active">Balance</a>
             <a>Send</a>
             <a>Receive</a>
+            <a>Faucet</a>
             <a>Sign</a>
           </nav>
           <div className="loading">Loading...</div>
@@ -375,6 +406,7 @@ export default function Wallet() {
             <a className="active">Balance</a>
             <a>Send</a>
             <a>Receive</a>
+            <a>Faucet</a>
             <a>Sign</a>
           </nav>
           <h1>Create Wallet</h1>
@@ -448,6 +480,16 @@ export default function Wallet() {
           </a>
           <a className={view === 'receive' ? 'active' : ''} onClick={() => setView('receive')}>
             Receive
+          </a>
+          <a className={`${view === 'faucet' ? 'active' : ''} ${faucetReady ? 'faucet-ready' : ''}`} onClick={() => setView('faucet')}>
+            Faucet
+            {faucetReady && (
+              <span className="tab-sparkles">
+                <span className="tab-sparkle"></span>
+                <span className="tab-sparkle"></span>
+                <span className="tab-sparkle"></span>
+              </span>
+            )}
           </a>
           <a className={view === 'sign' ? 'active' : ''} onClick={() => setView('sign')}>
             Sign
@@ -610,6 +652,10 @@ export default function Wallet() {
           </p>
         </div>
         </>
+      )}
+
+      {view === 'faucet' && (
+        <Faucet pkHash={wallet.address} />
       )}
 
       {view === 'sign' && (

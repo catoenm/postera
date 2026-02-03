@@ -202,3 +202,111 @@ export async function getChainInfo(): Promise<{
   }
   return res.json();
 }
+
+// ============ Faucet API ============
+
+/**
+ * Faucet status response.
+ */
+export interface FaucetStatusResponse {
+  can_claim: boolean;
+  seconds_until_eligible: number;
+  streak: number;
+  total_claimed: string;
+  daily_amount: string;
+}
+
+/**
+ * Faucet claim response.
+ */
+export interface ClaimResponse {
+  success: boolean;
+  tx_hash: string;
+  amount: string;
+  new_streak: number;
+  message: string;
+}
+
+/**
+ * Faucet stats response.
+ */
+export interface FaucetStatsResponse {
+  total_distributed: string;
+  unique_claimants: number;
+  active_streaks: number;
+  balance: string | null;
+  enabled: boolean;
+}
+
+/**
+ * Get faucet status for a wallet.
+ */
+export async function getFaucetStatus(pkHash: string): Promise<FaucetStatusResponse> {
+  const res = await fetch(`${API_BASE}/faucet/status/${pkHash}`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to get faucet status: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Claim from the faucet.
+ */
+export async function claimFromFaucet(pkHash: string): Promise<ClaimResponse> {
+  const res = await fetch(`${API_BASE}/faucet/claim`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pk_hash: pkHash }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to claim from faucet: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Get public faucet statistics.
+ */
+export async function getFaucetStats(): Promise<FaucetStatsResponse> {
+  const res = await fetch(`${API_BASE}/faucet/stats`);
+  if (!res.ok) {
+    throw new Error(`Failed to get faucet stats: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Game-based faucet claim request.
+ */
+export interface GameClaimRequest {
+  pk_hash: string;
+  tokens_collected: number;
+}
+
+/**
+ * Claim from the faucet via game (variable amount based on tokens collected).
+ * @param pkHash - The wallet's pk_hash
+ * @param tokensCollected - Number of tokens collected in game (1-10)
+ */
+export async function claimFromFaucetGame(
+  pkHash: string,
+  tokensCollected: number
+): Promise<ClaimResponse> {
+  const res = await fetch(`${API_BASE}/faucet/game-claim`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      pk_hash: pkHash,
+      tokens_collected: tokensCollected,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to claim from faucet game: ${res.status}`);
+  }
+  return res.json();
+}

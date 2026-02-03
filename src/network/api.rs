@@ -18,9 +18,11 @@ use tower_governor::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
+use tokio::sync::RwLock as TokioRwLock;
 
 use crate::core::{ShieldedBlock, ShieldedBlockchain, ChainInfo, ShieldedTransaction, ShieldedTransactionV2, Transaction};
 use crate::crypto::nullifier::Nullifier;
+use crate::faucet::{FaucetService, FaucetStatus, ClaimResult, FaucetStats, FaucetError};
 use tracing::{info, warn};
 
 use super::Mempool;
@@ -42,6 +44,8 @@ pub struct AppState {
     pub peers: RwLock<Vec<String>>,
     /// Stats for the local miner (if running)
     pub miner_stats: RwLock<MinerStats>,
+    /// Optional faucet service (enabled via CLI flag)
+    pub faucet: Option<TokioRwLock<FaucetService>>,
 }
 
 /// Create the API router with rate limiting and request size limits.
@@ -103,6 +107,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/debug/poseidon-pq", get(debug_poseidon_pq_test))
         .route("/debug/merkle-pq", get(debug_merkle_pq))
         .route("/debug/verify-path", post(debug_verify_path))
+        // Faucet endpoints
+        .route("/faucet/status/:pk_hash", get(faucet_status))
+        .route("/faucet/claim", post(faucet_claim))
+        .route("/faucet/game-claim", post(faucet_game_claim))
+        .route("/faucet/stats", get(faucet_stats))
         .with_state(state)
         // Apply rate limiting (returns 429 Too Many Requests when exceeded)
         .layer(rate_limit_layer)
@@ -1337,6 +1346,209 @@ async fn debug_verify_path(
         "computed_root": hex::encode(computed_root),
         "debug": debug_info,
     }))
+}
+
+// ============ Faucet Endpoints ============
+
+/// Get faucet status for a wallet.
+async fn faucet_status(
+    State(state): State<Arc<AppState>>,
+    Path(pk_hash): Path<String>,
+) -> Result<Json<FaucetStatus>, (StatusCode, String)> {
+    let faucet = state.faucet.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "Faucet not enabled".to_string())
+    })?;
+
+    let faucet = faucet.read().await;
+    faucet
+        .get_claim_info(&pk_hash)
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+/// Request to claim from the faucet.
+#[derive(Deserialize)]
+struct FaucetClaimRequest {
+    pk_hash: String,
+}
+
+/// Claim from the faucet.
+async fn faucet_claim(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<FaucetClaimRequest>,
+) -> Result<Json<ClaimResult>, (StatusCode, String)> {
+    use std::collections::HashMap;
+
+    let faucet_lock = state.faucet.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "Faucet not enabled".to_string())
+    })?;
+
+    // First, get the note positions we need witnesses for (read lock on faucet)
+    let positions = {
+        let faucet = faucet_lock.read().await;
+        faucet.get_note_positions_for_claim().map_err(|e| {
+            let status = match &e {
+                FaucetError::InsufficientBalance { .. } => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?
+    };
+
+    // Get witnesses from blockchain state
+    let witnesses: HashMap<u64, _> = {
+        let blockchain = state.blockchain.read().unwrap();
+        let shielded_state = blockchain.state();
+        positions
+            .iter()
+            .filter_map(|&pos| {
+                shielded_state.witness_pq(pos).map(|w| (pos, w))
+            })
+            .collect()
+    };
+
+    // Process the claim (requires write lock since it modifies faucet state)
+    let result = {
+        let mut faucet = faucet_lock.write().await;
+        faucet.process_claim(&req.pk_hash, &witnesses)
+    };
+
+    match result {
+        Ok((claim_result, tx)) => {
+            // Submit the transaction to the mempool
+            let mut mempool = state.mempool.write().unwrap();
+
+            // Wrap in Transaction::V2 for mempool
+            let wrapped_tx = crate::core::Transaction::V2(tx);
+            if !mempool.add_v2(wrapped_tx) {
+                tracing::warn!("Failed to add faucet tx to mempool");
+                // Transaction was created but mempool rejected it - still return success
+                // as the claim was recorded
+            }
+
+            Ok(Json(claim_result))
+        }
+        Err(e) => {
+            let status = match &e {
+                FaucetError::CooldownActive(_) => StatusCode::TOO_MANY_REQUESTS,
+                FaucetError::InvalidPkHash => StatusCode::BAD_REQUEST,
+                FaucetError::InsufficientBalance { .. } => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            Err((status, e.to_string()))
+        }
+    }
+}
+
+/// Request for game-based faucet claim.
+#[derive(Deserialize)]
+struct FaucetGameClaimRequest {
+    pk_hash: String,
+    tokens_collected: u8,
+}
+
+/// Claim from the faucet via game (variable amount based on tokens).
+async fn faucet_game_claim(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<FaucetGameClaimRequest>,
+) -> Result<Json<ClaimResult>, (StatusCode, String)> {
+    use std::collections::HashMap;
+
+    let faucet_lock = state.faucet.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, "Faucet not enabled".to_string())
+    })?;
+
+    // Validate token count (1-10)
+    if req.tokens_collected < 1 || req.tokens_collected > 10 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("tokens_collected must be between 1 and 10, got {}", req.tokens_collected),
+        ));
+    }
+
+    // Get note positions needed for this claim amount
+    let positions = {
+        let faucet = faucet_lock.read().await;
+        faucet.get_note_positions_for_game_claim(req.tokens_collected).map_err(|e| {
+            let status = match &e {
+                FaucetError::InsufficientBalance { .. } => StatusCode::SERVICE_UNAVAILABLE,
+                FaucetError::InvalidTokenCount(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?
+    };
+
+    // Get witnesses from blockchain state
+    let witnesses: HashMap<u64, _> = {
+        let blockchain = state.blockchain.read().unwrap();
+        let shielded_state = blockchain.state();
+        positions
+            .iter()
+            .filter_map(|&pos| {
+                shielded_state.witness_pq(pos).map(|w| (pos, w))
+            })
+            .collect()
+    };
+
+    // Process the game claim
+    let result = {
+        let mut faucet = faucet_lock.write().await;
+        faucet.process_game_claim(&req.pk_hash, req.tokens_collected, &witnesses)
+    };
+
+    match result {
+        Ok((claim_result, tx)) => {
+            // Submit the transaction to the mempool
+            let mut mempool = state.mempool.write().unwrap();
+
+            let wrapped_tx = crate::core::Transaction::V2(tx);
+            if !mempool.add_v2(wrapped_tx) {
+                tracing::warn!("Failed to add faucet game tx to mempool");
+            }
+
+            info!(
+                "Faucet game claim: {} tokens -> {} to {}",
+                req.tokens_collected, claim_result.amount, &req.pk_hash[..16]
+            );
+
+            Ok(Json(claim_result))
+        }
+        Err(e) => {
+            let status = match &e {
+                FaucetError::CooldownActive(_) => StatusCode::TOO_MANY_REQUESTS,
+                FaucetError::InvalidPkHash => StatusCode::BAD_REQUEST,
+                FaucetError::InvalidTokenCount(_) => StatusCode::BAD_REQUEST,
+                FaucetError::InsufficientBalance { .. } => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            Err((status, e.to_string()))
+        }
+    }
+}
+
+/// Get public faucet statistics.
+async fn faucet_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<FaucetStats>, (StatusCode, String)> {
+    let faucet = match state.faucet.as_ref() {
+        Some(f) => f.read().await,
+        None => {
+            // Return disabled stats if faucet not enabled
+            return Ok(Json(FaucetStats {
+                total_distributed: "0.0 PSTR".to_string(),
+                unique_claimants: 0,
+                active_streaks: 0,
+                balance: None,
+                enabled: false,
+            }));
+        }
+    };
+
+    faucet
+        .get_stats()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 // ============ React App ============

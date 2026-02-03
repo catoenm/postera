@@ -192,6 +192,11 @@ impl ShieldedWallet {
         self.pk_hash
     }
 
+    /// Get the signing keypair.
+    pub fn keypair(&self) -> &KeyPair {
+        &self.keypair
+    }
+
     /// Get the viewing key.
     pub fn viewing_key(&self) -> &ViewingKey {
         &self.viewing_key
