@@ -154,13 +154,13 @@ export default function Wallet() {
       }
     };
 
-    // Check immediately
+    // Check immediately and when switching views (catches post-claim state)
     checkFaucetStatus();
 
     // Check every 30 seconds
     const interval = setInterval(checkFaucetStatus, 30000);
     return () => clearInterval(interval);
-  }, [wallet]);
+  }, [wallet, view]);
 
   // Create new wallet
   const createWallet = async () => {

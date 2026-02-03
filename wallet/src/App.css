@@ -249,17 +249,19 @@ label {
 /* Faucet tab ready state with sparkles */
 .nav-tabs a.faucet-ready {
   position: relative;
-  background: linear-gradient(135deg, #58a6ff 0%, #a371f7 100%);
-  color: white;
   animation: tab-glow 2s ease-in-out infinite;
+}
+
+.nav-tabs a.faucet-ready:not(.active) {
+  color: var(--text-secondary);
 }
 
 @keyframes tab-glow {
   0%, 100% {
-    box-shadow: 0 0 8px rgba(88, 166, 255, 0.4), 0 0 16px rgba(163, 113, 247, 0.2);
+    box-shadow: 0 0 6px rgba(88, 166, 255, 0.3), 0 0 12px rgba(163, 113, 247, 0.15);
   }
   50% {
-    box-shadow: 0 0 12px rgba(88, 166, 255, 0.6), 0 0 24px rgba(163, 113, 247, 0.4);
+    box-shadow: 0 0 10px rgba(88, 166, 255, 0.5), 0 0 20px rgba(163, 113, 247, 0.3);
   }
 }
 

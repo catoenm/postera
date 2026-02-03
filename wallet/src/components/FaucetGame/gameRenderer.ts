@@ -375,34 +375,100 @@ export function drawInstructions(ctx: CanvasRenderingContext2D, phase: 'idle' | 
   ctx.fillText('Press SPACE or tap to start', canvasWidth / 2, CANVAS_HEIGHT / 2);
 }
 
-// Draw score in top right
-export function drawScore(ctx: CanvasRenderingContext2D, tokensCollected: number, canvasWidth: number): void {
-  // Only count non-bonus tokens for display (capped at TOTAL_OBSTACLES)
-  const displayCount = Math.min(tokensCollected, TOTAL_OBSTACLES);
+// Draw mini Postera logo
+function drawMiniLogo(ctx: CanvasRenderingContext2D, x: number, y: number, size: number): void {
+  // Left circle (cyan)
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = '#38bdf8';
+  ctx.beginPath();
+  ctx.arc(x - size * 0.3, y, size, 0, Math.PI * 2);
+  ctx.fill();
 
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+  // Right circle (purple)
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = '#c026d3';
+  ctx.beginPath();
+  ctx.arc(x + size * 0.3, y, size, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.globalAlpha = 1;
+}
+
+// Draw score in top right with Postera logo
+export function drawScore(ctx: CanvasRenderingContext2D, claimableCount: number, totalScore: number, canvasWidth: number): void {
+  // Claimable count (X/10) with logo
+  const scoreX = canvasWidth - 16;
+
+  // Draw logo
+  drawMiniLogo(ctx, scoreX - 70, 24, 8);
+
+  // Draw claimable count
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
   ctx.font = 'bold 18px sans-serif';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'top';
-  ctx.fillText(`${displayCount}/${TOTAL_OBSTACLES}`, canvasWidth - 16, 16);
+  ctx.fillText(`${claimableCount}/${TOTAL_OBSTACLES}`, scoreX, 16);
+
+  // Draw total score below
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+  ctx.font = '14px sans-serif';
+  ctx.fillText(`Score: ${totalScore}`, scoreX, 38);
 }
 
-// Draw game over indicator (clean, top right)
+// Draw game over with score celebration
 export function drawGameOver(
   ctx: CanvasRenderingContext2D,
-  _tokensCollected: number,
+  totalScore: number,
   collision: boolean,
-  canvasWidth: number
+  canvasWidth: number,
+  frameCount: number
 ): void {
-  // Only show indicator if collision
-  if (collision) {
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-    ctx.font = '14px sans-serif';
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'top';
-    ctx.fillText('Game Over', canvasWidth - 16, 40);
+  if (!collision) return;
+
+  // Score celebration in center
+  const centerX = canvasWidth / 2;
+  const centerY = CANVAS_HEIGHT / 2;
+
+  // Glimmer particles around score
+  const glimmerCount = 12;
+  for (let i = 0; i < glimmerCount; i++) {
+    const angle = (Math.PI * 2 * i) / glimmerCount + frameCount * 0.02;
+    const radius = 60 + Math.sin(frameCount * 0.1 + i) * 10;
+    const px = centerX + Math.cos(angle) * radius;
+    const py = centerY + Math.sin(angle) * radius;
+    const size = 3 + Math.sin(frameCount * 0.15 + i * 0.5) * 2;
+
+    // Alternate colors
+    const colors = ['#38bdf8', '#c026d3', '#fbbf24', '#4ade80'];
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.globalAlpha = 0.6 + Math.sin(frameCount * 0.1 + i) * 0.3;
+    ctx.beginPath();
+    ctx.arc(px, py, size, 0, Math.PI * 2);
+    ctx.fill();
   }
+  ctx.globalAlpha = 1;
+
+  // Score background glow
+  ctx.shadowColor = 'rgba(56, 189, 248, 0.5)';
+  ctx.shadowBlur = 20;
+
+  // Score text
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 48px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${totalScore}`, centerX, centerY - 10);
+
+  ctx.shadowBlur = 0;
+
+  // "Score" label
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+  ctx.font = '16px sans-serif';
+  ctx.fillText('SCORE', centerX, centerY + 30);
 }
+
+// Frame counter for animations
+let frameCount = 0;
 
 // Main render function
 export function render(
@@ -411,6 +477,8 @@ export function render(
   dimensions: CanvasDimensions,
   collision: boolean = false
 ): void {
+  frameCount++;
+
   // Clear and scale
   ctx.save();
 
@@ -439,18 +507,20 @@ export function render(
   // Draw particles
   drawParticles(ctx, state.particles);
 
+  // Count tokens
+  const claimableCount = state.tokens.filter(t => t.collected && !t.isBonus).length;
+  const totalScore = state.tokensCollected;
+
   // Draw score in top right when playing or ended
   if (state.phase === 'playing' || state.phase === 'ended') {
-    // Count only non-bonus tokens
-    const claimableCount = state.tokens.filter(t => t.collected && !t.isBonus).length;
-    drawScore(ctx, claimableCount, canvasWidth);
+    drawScore(ctx, claimableCount, totalScore, canvasWidth);
   }
 
   // Draw overlays
   if (state.phase === 'idle') {
     drawInstructions(ctx, state.phase, canvasWidth);
   } else if (state.phase === 'ended') {
-    drawGameOver(ctx, state.tokensCollected, collision, canvasWidth);
+    drawGameOver(ctx, totalScore, collision, canvasWidth, frameCount);
   }
 
   ctx.restore();
