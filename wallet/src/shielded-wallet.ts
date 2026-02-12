@@ -14,7 +14,7 @@ import {
   initPoseidon,
 } from './shielded-crypto';
 import { hexToBytes, bytesToHex } from './crypto';
-import { getOutputsSince, checkNullifiers } from './api';
+import { getOutputsSince, checkNullifiers, getChainInfo } from './api';
 import { loadProvingKeys, areProvingKeysLoaded } from './prover';
 import { initBindingCrypto, isBindingCryptoReady } from './binding';
 import { deriveNullifierPQ, initPQCrypto, isPQCryptoInitialized } from './commitment-pq';
@@ -167,9 +167,9 @@ export class ShieldedWallet {
     let newNotesFound = 0;
 
     try {
-      // First, check current chain height to detect chain resets
-      const initialResponse = await getOutputsSince(0);
-      const current_height = initialResponse.current_height;
+      // Check current chain height using lightweight endpoint (O(1), no block iteration)
+      const chainInfo = await getChainInfo();
+      const current_height = chainInfo.height;
 
       // Detect chain reset: if chain height is lower than our last scanned height,
       // the chain was reset and we need to clear our state and rescan from 0
@@ -194,19 +194,45 @@ export class ShieldedWallet {
         sinceHeight = this.lastScannedHeight;
       }
 
-      onProgress?.(`Fetching outputs since height ${sinceHeight}...`);
+      // Skip if already up to date
+      if (sinceHeight >= current_height && this.lastScannedHeight >= 0) {
+        onProgress?.('Already up to date.');
+        this.scanning = false;
+        return 0;
+      }
 
-      // Use the initial response if scanning from 0, otherwise fetch again
-      const response = sinceHeight === 0 ? initialResponse : await getOutputsSince(sinceHeight);
-      const { outputs } = response;
+      // Scan in batches to avoid massive single responses
+      const BATCH_SIZE = 500; // blocks per batch
+      let batchStart = sinceHeight;
 
-      // Use parallel scanning with Web Workers if available and enough outputs
-      const useParallel = isWorkerSupported() && outputs.length > 100;
+      while (batchStart < current_height) {
+        const blocksRemaining = current_height - batchStart;
+        const batchLimit = Math.min(BATCH_SIZE, blocksRemaining);
+        onProgress?.(`Fetching outputs: blocks ${batchStart + 1}-${batchStart + batchLimit} of ${current_height}...`);
 
-      if (useParallel) {
-        newNotesFound = await this.scanParallel(outputs, onProgress);
-      } else {
-        newNotesFound = this.scanSequential(outputs, onProgress);
+        const response = await getOutputsSince(batchStart, batchLimit);
+        const { outputs } = response;
+
+        if (outputs.length === 0) {
+          // No outputs in this batch, move on
+          batchStart += batchLimit;
+          continue;
+        }
+
+        // Use parallel scanning with Web Workers if available and enough outputs
+        const useParallel = isWorkerSupported() && outputs.length > 100;
+
+        if (useParallel) {
+          newNotesFound += await this.scanParallel(outputs, onProgress);
+        } else {
+          newNotesFound += this.scanSequential(outputs, onProgress);
+        }
+
+        batchStart += batchLimit;
+
+        // Save progress after each batch so we can resume if interrupted
+        this.lastScannedHeight = Math.min(batchStart, current_height);
+        this.saveState();
       }
 
       this.lastScannedHeight = current_height;

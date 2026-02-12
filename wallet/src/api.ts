@@ -58,9 +58,12 @@ export async function submitTransaction(tx: SubmitTxRequest): Promise<{ hash: st
 /**
  * Get all encrypted outputs since a given block height.
  * Used for scanning the blockchain for incoming notes.
+ * @param height - Block height to start from
+ * @param limit - Optional max number of blocks to include (for batched scanning)
  */
-export async function getOutputsSince(height: number): Promise<OutputsSinceResponse> {
-  const res = await fetch(`${API_BASE}/outputs/since/${height}`);
+export async function getOutputsSince(height: number, limit?: number): Promise<OutputsSinceResponse> {
+  const params = limit ? `?limit=${limit}` : '';
+  const res = await fetch(`${API_BASE}/outputs/since/${height}${params}`);
   if (!res.ok) {
     throw new Error(`Failed to fetch outputs: ${res.status}`);
   }
@@ -194,6 +197,7 @@ export async function getChainInfo(): Promise<{
   latest_hash: string;
   difficulty: number;
   commitment_count: number;
+  commitment_count_pq: number;
   nullifier_count: number;
 }> {
   const res = await fetch(`${API_BASE}/chain/info`);

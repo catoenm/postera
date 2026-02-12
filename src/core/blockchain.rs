@@ -806,6 +806,7 @@ impl ShieldedBlockchain {
             nullifier_count: self.nullifier_count() as u64,
             proof_verification_enabled: self.verifying_params.is_some(),
             assume_valid_height: self.assume_valid_height,
+            commitment_count_pq: self.state.commitment_tree_pq().size(),
         }
     }
 
@@ -852,6 +853,9 @@ pub struct ChainInfo {
     /// Assume-valid checkpoint height. Blocks at or below this height
     /// skip ZK proof verification during sync. Set to 0 if disabled.
     pub assume_valid_height: u64,
+    /// Total number of commitments in the V2/PQ tree.
+    /// This equals the total position counter across all blocks.
+    pub commitment_count_pq: u64,
 }
 
 #[derive(Debug, thiserror::Error)]

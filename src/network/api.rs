@@ -835,25 +835,36 @@ async fn get_outputs_since(
     };
 
     let mut outputs = Vec::new();
-    let mut position = 0u64;
 
     // Determine the starting height for collecting outputs
     // If since_height is 0, we want ALL outputs (initial scan)
     // Otherwise, we want outputs from since_height+1 onwards
     let start_height = if since_height == 0 { 0 } else { since_height + 1 };
 
-    // First, count all commitments before start_height to get starting position
-    for h in 0..start_height.min(current_height + 1) {
-        if let Some(block) = chain.get_block_by_height(h) {
-            for tx in &block.transactions {
-                position += tx.outputs.len() as u64;
+    // Compute starting position efficiently:
+    // Instead of iterating all blocks from 0..start_height (O(total_blocks)),
+    // use total tree size and count backwards from end_height (O(new_blocks)).
+    let total_pq_size = chain.state().commitment_tree_pq().size();
+    let position = if start_height == 0 {
+        0u64
+    } else {
+        // Count commitments from start_height..=end_height (the outputs we'll return)
+        let mut outputs_in_range = 0u64;
+        for h in start_height..=end_height {
+            if let Some(block) = chain.get_block_by_height(h) {
+                for tx in &block.transactions {
+                    outputs_in_range += tx.outputs.len() as u64;
+                }
+                for tx in &block.transactions_v2 {
+                    outputs_in_range += tx.outputs.len() as u64;
+                }
+                outputs_in_range += 1; // coinbase
             }
-            for tx in &block.transactions_v2 {
-                position += tx.outputs.len() as u64;
-            }
-            position += 1; // coinbase
         }
-    }
+        // Position at start_height = total_size - outputs_in_range
+        total_pq_size.saturating_sub(outputs_in_range)
+    };
+    let mut position = position;
 
     // Now collect outputs from start_height onwards
     for h in start_height..=end_height {
