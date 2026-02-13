@@ -34,6 +34,7 @@ interface ScanOutput {
   note_commitment: string; // hex
   position: number;
   block_height: number;
+  view_tag?: string;       // hex-encoded single byte
 }
 
 interface DecryptedNote {
@@ -83,20 +84,31 @@ function bytes32ToBigint(bytes: Uint8Array): bigint {
 }
 
 /**
- * Derive shared secret using ECDH-like construction.
+ * Derive encryption key matching Rust's ViewingKey::derive_encryption_key.
+ * EncKey = BLAKE2s("Postera_NoteEncryption" || pkHash || ephemeralPk)
  */
-function deriveSharedSecret(ephemeralPk: Uint8Array, pkHash: Uint8Array): Uint8Array {
-  // Hash ephemeral public key with pk_hash to derive shared secret
+function deriveEncryptionKey(pkHash: Uint8Array, ephemeralPk: Uint8Array): Uint8Array {
   const input = new Uint8Array([
-    ...new TextEncoder().encode('Postera_NoteKey'),
-    ...ephemeralPk,
+    ...new TextEncoder().encode('Postera_NoteEncryption'),
     ...pkHash,
+    ...ephemeralPk,
   ]);
   return blake2s(input, { dkLen: 32 });
 }
 
 /**
+ * Compute view tag for fast scanning rejection.
+ * Returns first byte of the encryption key.
+ */
+function computeViewTag(pkHash: Uint8Array, ephemeralPk: Uint8Array): number {
+  return deriveEncryptionKey(pkHash, ephemeralPk)[0];
+}
+
+/**
  * Try to decrypt note data.
+ * Uses the correct key derivation matching Rust exactly:
+ * - Key: BLAKE2s("Postera_NoteEncryption" || pkHash || ephemeralPk)
+ * - Nonce: ephemeralPk[0:12]
  */
 function tryDecrypt(
   ciphertextHex: string,
@@ -107,12 +119,16 @@ function tryDecrypt(
     const ciphertext = hexToBytes(ciphertextHex);
     const ephemeralPk = hexToBytes(ephemeralPkHex);
 
-    // Derive shared secret
-    const sharedSecret = deriveSharedSecret(ephemeralPk, pkHash);
+    // Derive encryption key (matching Rust's derive_encryption_key)
+    const encryptionKey = deriveEncryptionKey(pkHash, ephemeralPk);
 
-    // ChaCha20-Poly1305 with zero nonce
-    const nonce = new Uint8Array(12);
-    const cipher = chacha20poly1305(sharedSecret, nonce);
+    // Use first 12 bytes of ephemeral_pk as nonce (matching Rust)
+    if (ephemeralPk.length < 12) {
+      return null;
+    }
+    const nonce = ephemeralPk.slice(0, 12);
+
+    const cipher = chacha20poly1305(encryptionKey, nonce);
 
     let plaintext: Uint8Array;
     try {
@@ -180,6 +196,17 @@ function scanOutputs(
     // Skip V2-only outputs
     if (!output.note_commitment || output.note_commitment.length === 0) {
       continue;
+    }
+
+    // View tag fast-reject: skip full decryption if view tags don't match.
+    // "00" or missing means legacy output — always attempt full decryption.
+    if (output.view_tag && output.view_tag !== '00') {
+      const ephemeralPk = hexToBytes(output.ephemeral_pk);
+      const expectedTag = computeViewTag(pkHash, ephemeralPk);
+      const actualTag = parseInt(output.view_tag, 16);
+      if (expectedTag !== actualTag) {
+        continue;
+      }
     }
 
     const decrypted = tryDecrypt(output.ciphertext, output.ephemeral_pk, pkHash);

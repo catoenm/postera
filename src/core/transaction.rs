@@ -803,6 +803,7 @@ mod tests {
         let encrypted = EncryptedNote {
             ciphertext: vec![1, 2, 3],
             ephemeral_pk: vec![4, 5, 6],
+            view_tag: 0,
         };
 
         let coinbase = CoinbaseTransaction::new(

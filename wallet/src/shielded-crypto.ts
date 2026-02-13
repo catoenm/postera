@@ -267,6 +267,16 @@ export function canDecryptNote(encrypted: EncryptedNote, viewingKey: Uint8Array)
 }
 
 /**
+ * Compute the view tag for fast scanning rejection.
+ * Returns the first byte of the encryption key derived from the viewing secret
+ * and ephemeral public key. Wallets compare this against the on-chain view_tag
+ * to skip ~99.6% of outputs without full decryption.
+ */
+export function computeViewTag(viewingSecret: Uint8Array, ephemeralPk: Uint8Array): number {
+  return deriveEncryptionKey(viewingSecret, ephemeralPk)[0];
+}
+
+/**
  * Initialize cryptographic primitives.
  * Must be called before using computeNoteCommitment or deriveNullifier.
  */

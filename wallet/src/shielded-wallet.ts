@@ -12,6 +12,7 @@ import {
   tryDecryptNoteFromHex,
   deriveNullifier,
   initPoseidon,
+  computeViewTag,
 } from './shielded-crypto';
 import { hexToBytes, bytesToHex } from './crypto';
 import { getOutputsSince, checkNullifiers, getChainInfo } from './api';
@@ -294,6 +295,7 @@ export class ShieldedWallet {
         note_commitment: o.note_commitment,
         position: typeof o.position === 'bigint' ? Number(o.position) : o.position,
         block_height: o.block_height,
+        view_tag: o.view_tag,
       }));
 
       // Run parallel scan
@@ -354,6 +356,17 @@ export class ShieldedWallet {
     // (they can only be processed by the V2 wallet via maybeAddV2Note)
     if (!output.note_commitment || output.note_commitment.length === 0) {
       return null;
+    }
+
+    // View tag fast-reject: skip full decryption if view tags don't match.
+    // "00" or missing means legacy output — always attempt full decryption.
+    if (output.view_tag && output.view_tag !== '00') {
+      const ephemeralPkBytes = hexToBytes(output.ephemeral_pk);
+      const expectedTag = computeViewTag(this.pkHash, ephemeralPkBytes);
+      const actualTag = parseInt(output.view_tag, 16);
+      if (expectedTag !== actualTag) {
+        return null;
+      }
     }
 
     const decrypted = tryDecryptNoteFromHex(
@@ -795,6 +808,16 @@ export class ShieldedWalletV2 extends ShieldedWallet {
     // Only process if V2/PQ commitment is available
     if (!output.note_commitment_pq || output.note_commitment_pq.length === 0) {
       return;
+    }
+
+    // View tag fast-reject
+    if (output.view_tag && output.view_tag !== '00') {
+      const ephemeralPkBytes = hexToBytes(output.ephemeral_pk);
+      const expectedTag = computeViewTag(this.pkHash, ephemeralPkBytes);
+      const actualTag = parseInt(output.view_tag, 16);
+      if (expectedTag !== actualTag) {
+        return;
+      }
     }
 
     // Try to decrypt the note

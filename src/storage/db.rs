@@ -357,6 +357,7 @@ mod tests {
             EncryptedNote {
                 ciphertext: vec![0; 64],
                 ephemeral_pk: vec![0; 32],
+                view_tag: 0,
             },
             50,
             height,

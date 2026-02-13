@@ -97,12 +97,16 @@ pub struct EncryptedNote {
     pub ciphertext: Vec<u8>,
     /// Ephemeral public key for ECDH key agreement (compressed).
     pub ephemeral_pk: Vec<u8>,
+    /// View tag: first byte of the encryption key.
+    /// Allows wallets to skip ~99.6% of outputs without full decryption.
+    #[serde(default)]
+    pub view_tag: u8,
 }
 
 impl EncryptedNote {
     /// Get the size of this encrypted note in bytes.
     pub fn size(&self) -> usize {
-        self.ciphertext.len() + self.ephemeral_pk.len()
+        self.ciphertext.len() + self.ephemeral_pk.len() + 1 // +1 for view_tag
     }
 }
 
@@ -189,6 +193,7 @@ impl ViewingKey {
         EncryptedNote {
             ciphertext,
             ephemeral_pk,
+            view_tag: encryption_key[0],
         }
     }
 
@@ -303,6 +308,7 @@ pub fn encrypt_note_pq(value: u64, pk_hash: &[u8; 32], randomness: &[u8; 32]) ->
     EncryptedNote {
         ciphertext,
         ephemeral_pk,
+        view_tag: encryption_key[0],
     }
 }
 

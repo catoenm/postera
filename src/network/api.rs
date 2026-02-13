@@ -808,6 +808,10 @@ struct EncryptedOutput {
     ephemeral_pk: String,
     /// Encrypted note ciphertext (hex).
     ciphertext: String,
+    /// View tag for fast scanning rejection (hex-encoded single byte).
+    /// First byte of the encryption key. Wallets compare this before attempting
+    /// full decryption, skipping ~99.6% of outputs.
+    view_tag: String,
 }
 
 /// Response for outputs/since/:height endpoint.
@@ -879,6 +883,7 @@ async fn get_outputs_since(
                         note_commitment_pq: String::new(), // V1 tx don't have PQ commitments
                         ephemeral_pk: hex::encode(&output.encrypted_note.ephemeral_pk),
                         ciphertext: hex::encode(&output.encrypted_note.ciphertext),
+                        view_tag: format!("{:02x}", output.encrypted_note.view_tag),
                     });
                     position += 1;
                 }
@@ -894,6 +899,7 @@ async fn get_outputs_since(
                         note_commitment_pq: hex::encode(output.note_commitment),
                         ephemeral_pk: hex::encode(&output.encrypted_note.ephemeral_pk),
                         ciphertext: hex::encode(&output.encrypted_note.ciphertext),
+                        view_tag: format!("{:02x}", output.encrypted_note.view_tag),
                     });
                     position += 1;
                 }
@@ -907,6 +913,7 @@ async fn get_outputs_since(
                 note_commitment_pq: hex::encode(block.coinbase.note_commitment_pq),
                 ephemeral_pk: hex::encode(&block.coinbase.encrypted_note.ephemeral_pk),
                 ciphertext: hex::encode(&block.coinbase.encrypted_note.ciphertext),
+                view_tag: format!("{:02x}", block.coinbase.encrypted_note.view_tag),
             });
             position += 1;
         }

@@ -15,6 +15,7 @@ interface ScanOutput {
   note_commitment_pq?: string;
   position: number;
   block_height: number;
+  view_tag?: string;
 }
 
 interface DecryptedNote {

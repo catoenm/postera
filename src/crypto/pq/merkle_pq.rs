@@ -7,8 +7,15 @@
 //!
 //! To match Plonky2's circuit, hashes are 4 Goldilocks field elements (256 bits).
 //! This is stored as 32 bytes in serialized form.
+//!
+//! ## Architecture
+//!
+//! Uses a sparse HashMap to store only non-empty nodes, giving:
+//! - O(1) root lookup
+//! - O(depth) append (32 hash operations)
+//! - O(depth) witness generation (32 lookups)
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,26 +38,29 @@ pub type TreeHashPQ = [u8; 32];
 /// Internal hash representation (4 field elements).
 type InternalHash = HashOut;
 
-/// Compute the empty tree hash at a given depth.
-/// This is cached for efficiency.
-fn empty_hash_at_depth(depth: usize) -> InternalHash {
-    if depth == 0 {
-        // Leaf level: hash of empty commitment
-        poseidon_pq_hash(&[DOMAIN_MERKLE_EMPTY_PQ])
-    } else {
-        // Internal node: hash of two empty children
-        let child = empty_hash_at_depth(depth - 1);
-        // Build input: [domain, left[4], right[4]] = 9 elements
-        let mut inputs = vec![DOMAIN_MERKLE_NODE_PQ];
-        inputs.extend_from_slice(&child);
-        inputs.extend_from_slice(&child);
-        poseidon_pq_hash(&inputs)
-    }
+/// Precomputed empty hashes at each depth level.
+/// EMPTY_HASHES_PQ[0] = hash of empty leaf
+/// EMPTY_HASHES_PQ[d] = hash_node(EMPTY_HASHES_PQ[d-1], EMPTY_HASHES_PQ[d-1])
+lazy_static::lazy_static! {
+    static ref EMPTY_HASHES_PQ: Vec<InternalHash> = {
+        let mut hashes = Vec::with_capacity(TREE_DEPTH_PQ + 1);
+        // Level 0: empty leaf hash
+        hashes.push(poseidon_pq_hash(&[DOMAIN_MERKLE_EMPTY_PQ]));
+        // Level d: hash of two empty children at level d-1
+        for _ in 1..=TREE_DEPTH_PQ {
+            let child = hashes.last().unwrap();
+            let mut inputs = vec![DOMAIN_MERKLE_NODE_PQ];
+            inputs.extend_from_slice(child);
+            inputs.extend_from_slice(child);
+            hashes.push(poseidon_pq_hash(&inputs));
+        }
+        hashes
+    };
 }
 
 /// Compute the root of an empty tree.
 pub fn empty_root_pq() -> TreeHashPQ {
-    hash_out_to_bytes(&empty_hash_at_depth(TREE_DEPTH_PQ))
+    hash_out_to_bytes(&EMPTY_HASHES_PQ[TREE_DEPTH_PQ])
 }
 
 /// Compute a node hash from two children (each 4 field elements).
@@ -136,34 +146,30 @@ fn serializable_to_hash(s: &SerializableHash) -> InternalHash {
 pub struct CommitmentTreeSnapshot {
     /// Number of leaves in the tree.
     pub size: u64,
-    /// Frontier hashes (as raw u64 arrays for serialization).
-    pub frontier: Vec<SerializableHash>,
+    /// Sparse node storage as Vec of ((level, index), hash).
+    pub nodes: Vec<((usize, u64), SerializableHash)>,
     /// Recent roots for anchor validation.
     pub recent_roots: Vec<TreeHashPQ>,
-    /// All leaves (as raw u64 arrays for serialization).
-    pub leaves: Vec<SerializableHash>,
     /// Version for future compatibility.
     pub version: u32,
 }
 
 /// A commitment tree for storing note commitments.
 ///
-/// Uses an incremental Merkle tree structure where:
-/// - Leaves are added left-to-right
-/// - Only the frontier (rightmost path) is stored in memory
-/// - Recent roots are cached for anchor validation
+/// Uses a sparse HashMap to store only non-empty nodes:
+/// - O(1) root lookup (just read nodes[(TREE_DEPTH, 0)])
+/// - O(depth) append (update 32 parent hashes)
+/// - O(depth) witness generation (read 32 sibling hashes)
 #[derive(Clone, Debug)]
 pub struct CommitmentTreePQ {
     /// Number of leaves in the tree.
     size: u64,
-    /// Frontier: hashes at each level on the rightmost path.
-    /// frontier[0] is the most recent leaf, frontier[31] is the root.
-    frontier: Vec<InternalHash>,
+    /// Sparse node storage: (level, index) -> hash.
+    /// Level 0 = leaves, level TREE_DEPTH_PQ = root.
+    /// Only stores nodes that differ from the precomputed empty hash.
+    nodes: HashMap<(usize, u64), InternalHash>,
     /// Recent roots for anchor validation.
     recent_roots: VecDeque<TreeHashPQ>,
-    /// All leaves (for witness generation in testing/local mode).
-    /// In production, this would be stored externally.
-    leaves: Vec<InternalHash>,
 }
 
 impl Default for CommitmentTreePQ {
@@ -175,12 +181,10 @@ impl Default for CommitmentTreePQ {
 impl CommitmentTreePQ {
     /// Create a new empty commitment tree.
     pub fn new() -> Self {
-        let zero_hash = [GoldilocksField::ZERO; 4];
         let mut tree = Self {
             size: 0,
-            frontier: vec![zero_hash; TREE_DEPTH_PQ],
+            nodes: HashMap::new(),
             recent_roots: VecDeque::with_capacity(RECENT_ROOTS_COUNT),
-            leaves: Vec::new(),
         };
 
         // Initialize with empty root
@@ -190,48 +194,27 @@ impl CommitmentTreePQ {
         tree
     }
 
-    /// Get the current root.
+    /// Get a node from the tree, returning the precomputed empty hash if absent.
+    fn get_node(&self, level: usize, index: u64) -> InternalHash {
+        self.nodes
+            .get(&(level, index))
+            .copied()
+            .unwrap_or(EMPTY_HASHES_PQ[level])
+    }
+
+    /// Set a node in the tree. Removes the entry if it equals the empty hash
+    /// to keep storage sparse.
+    fn set_node(&mut self, level: usize, index: u64, hash: InternalHash) {
+        if hash == EMPTY_HASHES_PQ[level] {
+            self.nodes.remove(&(level, index));
+        } else {
+            self.nodes.insert((level, index), hash);
+        }
+    }
+
+    /// Get the current root — O(1).
     pub fn root(&self) -> TreeHashPQ {
-        if self.size == 0 {
-            return empty_root_pq();
-        }
-
-        // Compute root from stored leaves (consistent with get_path)
-        // This is O(n log n) but correct. The frontier-based approach was buggy.
-        let mut level: Vec<InternalHash> = self.leaves.clone();
-
-        // Pad to next power of 2
-        let next_pow2 = (self.size as usize).next_power_of_two().max(2);
-        while level.len() < next_pow2 {
-            level.push(empty_hash_at_depth(0));
-        }
-
-        // Build tree levels until we reach the partial root
-        let mut depth = 0;
-        while level.len() > 1 {
-            let mut next_level = Vec::with_capacity(level.len() / 2 + 1);
-            for chunk in level.chunks(2) {
-                let left = &chunk[0];
-                let right = if chunk.len() > 1 {
-                    &chunk[1]
-                } else {
-                    &empty_hash_at_depth(depth)
-                };
-                next_level.push(hash_node(left, right));
-            }
-            level = next_level;
-            depth += 1;
-        }
-
-        // We now have the partial root (for next_pow2 leaves)
-        // Continue hashing with empty siblings up to TREE_DEPTH_PQ
-        let mut current = level[0];
-        while depth < TREE_DEPTH_PQ {
-            current = hash_node(&current, &empty_hash_at_depth(depth));
-            depth += 1;
-        }
-
-        hash_out_to_bytes(&current)
+        hash_out_to_bytes(&self.get_node(TREE_DEPTH_PQ, 0))
     }
 
     /// Get the empty root (for comparison).
@@ -254,27 +237,25 @@ impl CommitmentTreePQ {
         &self.recent_roots
     }
 
-    /// Append a commitment to the tree.
+    /// Append a commitment to the tree — O(depth).
     pub fn append(&mut self, commitment: &NoteCommitmentPQ) {
         let leaf = bytes_to_hash_out(&commitment.to_bytes());
-        self.leaves.push(leaf);
-
-        let mut current = leaf;
-        let mut position = self.size;
-
-        for depth in 0..TREE_DEPTH_PQ {
-            if position & 1 == 0 {
-                // This is a left child - save to frontier
-                self.frontier[depth] = current;
-                break;
-            } else {
-                // This is a right child - hash with frontier
-                current = hash_node(&self.frontier[depth], &current);
-            }
-            position >>= 1;
-        }
-
+        let position = self.size;
         self.size += 1;
+
+        // Set the leaf
+        self.set_node(0, position, leaf);
+
+        // Update parent hashes up to the root
+        let mut current_index = position;
+        for level in 0..TREE_DEPTH_PQ {
+            let parent_index = current_index / 2;
+            let left = self.get_node(level, parent_index * 2);
+            let right = self.get_node(level, parent_index * 2 + 1);
+            let parent_hash = hash_node(&left, &right);
+            self.set_node(level + 1, parent_index, parent_hash);
+            current_index = parent_index;
+        }
 
         // Update recent roots
         let new_root = self.root();
@@ -284,7 +265,7 @@ impl CommitmentTreePQ {
         }
     }
 
-    /// Get a Merkle path for a commitment at the given position.
+    /// Get a Merkle path for a commitment at the given position — O(depth).
     pub fn get_path(&self, position: u64) -> Option<MerklePathPQ> {
         if position >= self.size {
             return None;
@@ -292,52 +273,16 @@ impl CommitmentTreePQ {
 
         let mut siblings = Vec::with_capacity(TREE_DEPTH_PQ);
         let mut indices = Vec::with_capacity(TREE_DEPTH_PQ);
-        let mut pos = position;
+        let mut current_index = position;
 
-        // Build path from stored leaves
-        // This is O(n log n) but works for small trees. Production would use a database.
-        let mut level: Vec<InternalHash> = self.leaves.clone();
-
-        // Pad to next power of 2 (only what we need, not the full tree)
-        let next_pow2 = (self.size as usize).next_power_of_two().max(2);
-        while level.len() < next_pow2 {
-            level.push(empty_hash_at_depth(0));
-        }
-
-        for depth in 0..TREE_DEPTH_PQ {
-            let sibling_pos = if pos & 1 == 0 { pos + 1 } else { pos - 1 };
-
-            let sibling = if sibling_pos < level.len() as u64 {
-                level[sibling_pos as usize]
-            } else {
-                empty_hash_at_depth(depth)
-            };
+        for level in 0..TREE_DEPTH_PQ {
+            let sibling_index = current_index ^ 1;
+            let sibling = self.get_node(level, sibling_index);
 
             siblings.push(hash_out_to_bytes(&sibling));
-            indices.push((pos & 1) as u8);
+            indices.push((current_index & 1) as u8);
 
-            // Move up the tree
-            if level.len() <= 1 {
-                // We've reached the root, fill remaining with empty siblings
-                for d in (depth + 1)..TREE_DEPTH_PQ {
-                    siblings.push(hash_out_to_bytes(&empty_hash_at_depth(d)));
-                    indices.push(0);
-                }
-                break;
-            }
-
-            let mut next_level = Vec::with_capacity(level.len() / 2 + 1);
-            for chunk in level.chunks(2) {
-                let left = &chunk[0];
-                let right = if chunk.len() > 1 {
-                    &chunk[1]
-                } else {
-                    &empty_hash_at_depth(depth)
-                };
-                next_level.push(hash_node(left, right));
-            }
-            level = next_level;
-            pos >>= 1;
+            current_index /= 2;
         }
 
         Some(MerklePathPQ { siblings, indices })
@@ -357,20 +302,26 @@ impl CommitmentTreePQ {
     pub fn snapshot(&self) -> CommitmentTreeSnapshot {
         CommitmentTreeSnapshot {
             size: self.size,
-            frontier: self.frontier.iter().map(hash_to_serializable).collect(),
+            nodes: self.nodes
+                .iter()
+                .map(|(&key, hash)| (key, hash_to_serializable(hash)))
+                .collect(),
             recent_roots: self.recent_roots.iter().cloned().collect(),
-            leaves: self.leaves.iter().map(hash_to_serializable).collect(),
-            version: 1,
+            version: 2,
         }
     }
 
     /// Restore tree state from a snapshot.
     pub fn from_snapshot(snapshot: CommitmentTreeSnapshot) -> Self {
+        let nodes: HashMap<(usize, u64), InternalHash> = snapshot.nodes
+            .iter()
+            .map(|&(key, ref hash)| (key, serializable_to_hash(hash)))
+            .collect();
+
         Self {
             size: snapshot.size,
-            frontier: snapshot.frontier.iter().map(serializable_to_hash).collect(),
+            nodes,
             recent_roots: snapshot.recent_roots.into_iter().collect(),
-            leaves: snapshot.leaves.iter().map(serializable_to_hash).collect(),
         }
     }
 }

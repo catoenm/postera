@@ -57,6 +57,9 @@ export interface EncryptedOutput {
   note_commitment_pq: string;
   ephemeral_pk: string;
   ciphertext: string;
+  /** View tag for fast scanning rejection (hex-encoded single byte).
+   *  "00" or missing means legacy output (no fast-reject). */
+  view_tag?: string;
 }
 
 /**
