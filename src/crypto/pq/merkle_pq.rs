@@ -29,8 +29,10 @@ use super::poseidon_pq::{
 pub const TREE_DEPTH_PQ: usize = 32;
 
 /// Number of recent roots to keep for anchor validation.
-/// Larger value handles fast block production during proof generation.
-const RECENT_ROOTS_COUNT: usize = 1000;
+/// Each commitment append creates a new root entry, so the window in blocks
+/// is RECENT_ROOTS_COUNT / (avg commitments per block). With ~3 commits/block
+/// and 10s blocks, 10_000 roots ≈ 9+ hours of validity.
+const RECENT_ROOTS_COUNT: usize = 10_000;
 
 /// Hash type for tree nodes (4 field elements = 256 bits = 32 bytes).
 pub type TreeHashPQ = [u8; 32];

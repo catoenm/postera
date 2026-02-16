@@ -119,7 +119,7 @@ impl CommitmentTree {
             size: 0,
             nodes: HashMap::new(),
             recent_roots: vec![Self::empty_root()],
-            max_recent_roots: 1000, // Increased for fast block production
+            max_recent_roots: 10_000, // ~3k blocks at ~3 commits/block
         }
     }
 

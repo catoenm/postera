@@ -206,32 +206,83 @@ impl Mempool {
         self.pending_nullifiers.clear();
     }
 
-    /// Re-validate all V1 transactions against the current chain state.
+    /// Re-validate all transactions against the current chain state.
+    /// Removes transactions with stale anchors or spent nullifiers.
     /// Returns the number of transactions removed.
     pub fn revalidate(&mut self, state: &ShieldedState) -> usize {
-        let mut invalid_hashes = Vec::new();
+        let mut invalid_v1 = Vec::new();
+        let mut invalid_v2 = Vec::new();
 
+        // Check V1 transactions
         for (hash, tx) in &self.v1_transactions {
+            let mut is_invalid = false;
             // Check anchors are still valid
             for anchor in tx.anchors() {
                 if !state.is_valid_anchor(anchor) {
-                    invalid_hashes.push(*hash);
+                    is_invalid = true;
                     break;
                 }
             }
-
             // Check nullifiers aren't spent
-            for nullifier in tx.nullifiers() {
-                if state.is_nullifier_spent(nullifier) {
-                    invalid_hashes.push(*hash);
-                    break;
+            if !is_invalid {
+                for nullifier in tx.nullifiers() {
+                    if state.is_nullifier_spent(nullifier) {
+                        is_invalid = true;
+                        break;
+                    }
                 }
+            }
+            if is_invalid {
+                invalid_v1.push(*hash);
             }
         }
 
-        let removed = invalid_hashes.len();
-        for hash in invalid_hashes {
+        // Check V2/Migration transactions
+        for (hash, tx) in &self.v2_transactions {
+            let mut is_invalid = false;
+            match tx {
+                Transaction::V2(v2_tx) => {
+                    // Check PQ anchors
+                    for spend in &v2_tx.spends {
+                        if !state.is_valid_anchor_pq(&spend.anchor) {
+                            is_invalid = true;
+                            break;
+                        }
+                    }
+                }
+                Transaction::Migration(mig_tx) => {
+                    // Check V1 anchors for legacy spends
+                    for spend in &mig_tx.legacy_spends {
+                        if !state.is_valid_anchor(&spend.anchor) {
+                            is_invalid = true;
+                            break;
+                        }
+                    }
+                }
+                Transaction::V1(_) => {
+                    // Shouldn't be in v2_transactions, but check anyway
+                }
+            }
+            // Check nullifiers aren't spent
+            if !is_invalid {
+                for nullifier in tx.nullifiers() {
+                    if state.is_nullifier_spent(&crate::crypto::nullifier::Nullifier(nullifier)) {
+                        is_invalid = true;
+                        break;
+                    }
+                }
+            }
+            if is_invalid {
+                invalid_v2.push(*hash);
+            }
+        }
+
+        let removed = invalid_v1.len() + invalid_v2.len();
+        for hash in invalid_v1 {
             self.remove(&hash);
+        }
+        for hash in invalid_v2 {
+            self.remove_v2(&hash);
         }
 
         removed

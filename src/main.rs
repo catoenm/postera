@@ -869,6 +869,13 @@ async fn cmd_node(
                         }
                         Err(e) => {
                             println!("Failed to add mined block: {}", e);
+                            // Revalidate mempool to evict stale transactions
+                            // that caused the block to fail (e.g. expired anchors)
+                            let mut mempool = mine_state.mempool.write().unwrap();
+                            let removed = mempool.revalidate(chain.state());
+                            if removed > 0 {
+                                println!("  Removed {} stale transactions from mempool", removed);
+                            }
                             continue;
                         }
                     }
